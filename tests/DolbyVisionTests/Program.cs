@@ -58,4 +58,86 @@ Check(DvConversionPlanner.Build(mel with { EnhancementLayer = DvEnhancementLayer
 var nonDv = new DvSourceInfo(DvDetection.NotDetected, null, null, video, DvCompatibility.Yes, DvEnhancementLayer.None, DvRpuStatus.Absent, 10);
 Check(!DvConversionPlanner.Build(nonDv, DvConversionTarget.Hdr10).Supported, "Ordinary HDR10 never becomes DV");
 Check(typeof(DvConversionPlan).GetConstructors().Length == 0 && typeof(DvConversionPlan).GetProperties().All(p => p.SetMethod is null), "Plans cannot be externally constructed/mutated to erase warnings");
+
+// ---------------------------------------------------------------------------
+// Native Profile 7 playback lane: requested state and observed state must stay
+// separate, and the lane must never reach the Compatibility Export path.
+// ---------------------------------------------------------------------------
+var pinned = new NativeDvRuntime(@"D:\pinned\extracted\mpv.com", "b3c7e71e", "0.41.0-1042-g7e4cb538a", 371);
+NativeDvPlaybackPlan Native(DvSourceInfo src, NativeDvRuntime? rt = null, bool enabled = true, bool el = true) =>
+    NativeDvPlaybackPlanner.Build(src, rt ?? pinned, @"C:\media\authored.mkv", "config", "pipe", enabled, el);
+
+var nativeFel = Native(fel);
+Check(nativeFel.Supported && nativeFel.Rejection == NativeDvRejection.None, "Classified P7 FEL is playable natively");
+Check(nativeFel.Request is { SourceProfile: 7, EnhancementLayer: true, Renderer: "gpu-next" }, "Native request records what was asked for");
+Check(!nativeFel.RequiresConversion && nativeFel.MediaScratchPaths.IsEmpty, "Native playback declares no conversion and no media scratch");
+Check(nativeFel.Arguments.Contains("--cache-on-disk=no"), "Zero media scratch is a lane invariant, not a lab setting");
+Check(nativeFel.Arguments.Contains("--vf=format=enhancement-layer=yes"), "FEL request must be explicit");
+Check(nativeFel.Arguments.Contains("--vo=gpu-next"), "Native lane renders through gpu-next");
+int delimiter = nativeFel.Arguments.IndexOf("--");
+Check(delimiter >= 0 && nativeFel.Arguments[delimiter + 1] == @"C:\media\authored.mkv" && nativeFel.Arguments.Length == delimiter + 2,
+    "The authored container is played unchanged as the final argument");
+Check(!nativeFel.Arguments.Any(x => x.Contains("extract", StringComparison.OrdinalIgnoreCase) ||
+    x.Contains("encode", StringComparison.OrdinalIgnoreCase) || x.Contains("record", StringComparison.OrdinalIgnoreCase) ||
+    x.StartsWith("--o=") || x.StartsWith("--output=")), "Native playback never carries extraction or output arguments");
+// The laboratory harness disables audio and subtitles for measurement isolation.
+// A media player must not: the original container's tracks are the product.
+Check(!nativeFel.Arguments.Contains("--audio=no") && !nativeFel.Arguments.Contains("--sub=no"),
+    "Native playback preserves the original container's audio and subtitle tracks");
+Check(Native(mel).Supported && Native(mel).Explanation.Contains("MEL"), "MEL plays natively but claims no picture contribution");
+
+// The lane is opt-in and refuses everything it cannot establish.
+Check(Native(fel, enabled: false).Rejection == NativeDvRejection.ExperimentalLaneNotEnabled, "Native lane is never selected implicitly");
+Check(Native(fel with { EnhancementLayer = DvEnhancementLayer.Unknown }).Rejection == NativeDvRejection.EnhancementLayerUnclassified,
+    "MEL/FEL classification is required; profile 7 alone does not imply it");
+Check(Native(fel with { Rpu = DvRpuStatus.PresentUnvalidated }).Rejection == NativeDvRejection.RpuNotValidated, "Unvalidated RPU rejected");
+Check(Native(p81).Rejection == NativeDvRejection.UnsupportedProfile, "Native lane covers profile 7 only");
+Check(Native(p5).Rejection == NativeDvRejection.UnsupportedProfile, "Profile 5 is not in the native lane");
+Check(Native(nonDv).Rejection == NativeDvRejection.NotDolbyVision, "Ordinary HDR10 is not routed to the native lane");
+Check(Native(fel with { Hdr10Base = DvCompatibility.Unknown }).Rejection == NativeDvRejection.BaseNotHdr10Compatible, "Unknown base rejected");
+Check(Native(fel, new NativeDvRuntime(@"C:\mpv\mpv.exe", "x", "v", 371)).Rejection == NativeDvRejection.ExperimentalRuntimeUnavailable,
+    "The stable runtime is never repurposed for the experimental lane");
+Check(Native(fel, new NativeDvRuntime(@"relative\mpv.com", "x", "v", 371)).Rejection == NativeDvRejection.ExperimentalRuntimeUnavailable,
+    "The experimental runtime must be absolute");
+Check(Native(fel, pinned with { LibplaceboApi = 369 }).Rejection == NativeDvRejection.ExperimentalRuntimeUnavailable,
+    "A runtime below the composing libplacebo API is refused rather than silently degraded");
+foreach (var rejected in new[] { Native(fel, enabled: false), Native(p81), Native(nonDv) })
+    Check(!rejected.Supported && rejected.Request is null && rejected.Arguments.IsEmpty, "A rejected native plan carries no request and no argv");
+
+// Observation: nothing here may be inferred from the request.
+string[] two = ["hevc - HEVC (High Efficiency Video Coding)", "hevc - HEVC (High Efficiency Video Coding)"];
+var composed = NativeDvObservationReducer.Reduce(rendererObserved: true, splitterObserved: true, decoderInstances: 2,
+    selectedDecoders: two, blElPairObserved: true, compositionObserved: true, hardwareDecodingObserved: true,
+    softwareFallbackObserved: false, requestedEnhancementLayer: true, hardwareDecoderInUse: "d3d11va",
+    graphicsApi: "d3d11", graphicsContext: "d3d11", libplaceboApi: 371);
+Check(composed.Delivered == NativeDvDelivered.FullEnhancementLayer, "Observed composition delivers Full FEL");
+Check(composed.FelComposition == DvObservedState.Active && composed.BlElPairing == DvObservedState.Active, "Composition and pairing observed");
+Check(composed.EnhancementLayerDecoder is not null && composed.HardwareSurfaces == DvObservedState.Active, "EL decoder and hardware surfaces observed");
+Check(!composed.HasDegradation, "A fully composed run reports no degradation");
+
+// Requested but not composed: a base-layer-only result must say so.
+var blOnly = NativeDvObservationReducer.Reduce(true, true, 1, ["hevc - HEVC"], false, false, true, false, true);
+Check(blOnly.Delivered == NativeDvDelivered.BaseLayerOnly, "Requesting FEL cannot deliver FEL");
+Check(blOnly.FelComposition == DvObservedState.Inactive && blOnly.BlElPairing == DvObservedState.Inactive, "Uncomposed run reports Inactive, not Active");
+Check(blOnly.EnhancementLayerDecoder is null, "No enhancement-layer decoder is invented");
+Check(blOnly.Degradation.Any(x => x.Contains("base-layer-only")), "Base-layer-only fallback is named");
+Check(blOnly.Degradation.Any(x => x.Contains("Fewer than two")), "A missing second decoder is named");
+Check(!blOnly.Summary.Contains("Full enhancement-layer"), "A base-layer result never reads as Full FEL");
+
+// A renderer that never reported cannot support a negative claim.
+var silent = NativeDvObservationReducer.Reduce(false, false, 0, null, false, false, false, false, true);
+Check(silent.Delivered == NativeDvDelivered.Unknown, "Absent evidence stays Unknown, never Inactive");
+Check(silent.FelComposition == DvObservedState.Unknown && silent.BlElPairing == DvObservedState.Unknown, "Unknown is not promoted");
+Check(silent.Rpu == DvObservedState.Unknown && silent.HardwareSurfaces == DvObservedState.Unknown, "Unestablished state stays Unknown");
+Check(silent.Degradation.Any(x => x.Contains("could not be established")), "An unknown composition state is not a Full FEL claim");
+
+// Observation is independent of the request in both directions.
+var composedUnrequested = NativeDvObservationReducer.Reduce(true, true, 2, two, true, true, true, false, requestedEnhancementLayer: false);
+Check(composedUnrequested.Delivered == NativeDvDelivered.FullEnhancementLayer, "Observed composition is reported even when not requested");
+var softwarePath = NativeDvObservationReducer.Reduce(true, true, 2, two, true, true, false, true, true);
+Check(softwarePath.HardwareSurfaces == DvObservedState.Inactive, "Software fallback is visible");
+Check(softwarePath.Degradation.Any(x => x.Contains("Software decoding fallback")), "Software fallback is named");
+Check(typeof(NativeDvPlaybackPlan).GetConstructors().Length == 0 && typeof(NativeDvPlaybackPlan).GetProperties().All(x => x.SetMethod is null),
+    "Native plans cannot be externally constructed or mutated to erase a fallback");
+
 Console.WriteLine($"PASS: {checks} total Dolby Vision assertions");
