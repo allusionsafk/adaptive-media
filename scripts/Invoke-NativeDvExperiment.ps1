@@ -23,6 +23,55 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Import-Module (Join-Path $PSScriptRoot 'NativeDvExperiment.psm1') -Force
+if (-not ('NativeDvProcessIo' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public sealed class NativeDvProcessIoResult
+{
+    public ulong ReadOperationCount { get; set; }
+    public ulong WriteOperationCount { get; set; }
+    public ulong OtherOperationCount { get; set; }
+    public ulong ReadTransferBytes { get; set; }
+    public ulong WriteTransferBytes { get; set; }
+    public ulong OtherTransferBytes { get; set; }
+}
+
+public static class NativeDvProcessIo
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessIoCounters(IntPtr process, out IO_COUNTERS counters);
+
+    public static NativeDvProcessIoResult Read(Process process)
+    {
+        if (!GetProcessIoCounters(process.Handle, out IO_COUNTERS value))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return new NativeDvProcessIoResult {
+            ReadOperationCount = value.ReadOperationCount,
+            WriteOperationCount = value.WriteOperationCount,
+            OtherOperationCount = value.OtherOperationCount,
+            ReadTransferBytes = value.ReadTransferCount,
+            WriteTransferBytes = value.WriteTransferCount,
+            OtherTransferBytes = value.OtherTransferCount
+        };
+    }
+}
+'@
+}
+
+function Get-NativeDvProcessIo {
+    param([Parameter(Mandatory = $true)][Diagnostics.Process]$Process)
+    try { return [NativeDvProcessIo]::Read($Process) } catch { return $null }
+}
 
 function Write-NativeDvJson {
     param([Parameter(Mandatory = $true)]$Value, [Parameter(Mandatory = $true)][string]$Path, [int]$Depth = 30)
@@ -55,12 +104,14 @@ function Invoke-NativeDvCapturedProcess {
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $process.WaitForExit()
+    $io = Get-NativeDvProcessIo -Process $process
     [pscustomobject]@{
         Executable = $Executable
         Arguments = [string[]]$Arguments
         Environment = $Environment
         ExitCode = $process.ExitCode
         ElapsedMilliseconds = $watch.ElapsedMilliseconds
+        Io = $io
         StandardOutput = $stdoutTask.GetAwaiter().GetResult()
         StandardError = $stderrTask.GetAwaiter().GetResult()
     }
@@ -113,9 +164,11 @@ function Invoke-NativeDvRpuProbe {
     }
     if (-not $consumer.WaitForExit(60000)) { $consumer.Kill($true); throw 'dovi_tool RPU probe timed out.' }
     if (-not $producer.WaitForExit(10000)) { $producer.Kill($true); $producer.WaitForExit() }
+    $producerIo = Get-NativeDvProcessIo -Process $producer
+    $consumerIo = Get-NativeDvProcessIo -Process $consumer
     [pscustomobject]@{
-        Ffmpeg = [pscustomobject]@{ Executable = $Ffmpeg; Arguments = $ffmpegArgs; ExitCode = $producer.ExitCode; StandardError = $producerError.GetAwaiter().GetResult() }
-        DoviTool = [pscustomobject]@{ Executable = $DoviTool; Arguments = $doviArgs; ExitCode = $consumer.ExitCode; StandardOutput = $consumerOutput.GetAwaiter().GetResult(); StandardError = $consumerError.GetAwaiter().GetResult() }
+        Ffmpeg = [pscustomobject]@{ Executable = $Ffmpeg; Arguments = $ffmpegArgs; ExitCode = $producer.ExitCode; Io = $producerIo; StandardError = $producerError.GetAwaiter().GetResult() }
+        DoviTool = [pscustomobject]@{ Executable = $DoviTool; Arguments = $doviArgs; ExitCode = $consumer.ExitCode; Io = $consumerIo; StandardOutput = $consumerOutput.GetAwaiter().GetResult(); StandardError = $consumerError.GetAwaiter().GetResult() }
         PipeCopyError = $copyError
     }
 }
@@ -138,6 +191,26 @@ function Get-NativeDvIpcSnapshot {
 function Get-NativeDvMetricSample {
     param([int]$ProcessId, [string]$Phase, [string]$NvidiaSmi)
     $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    $io = Get-NativeDvProcessIo -Process $process
+    $processGpu = $null
+    try {
+        $counter = Get-Counter -Counter @(
+            "\GPU Process Memory(pid_${ProcessId}_*)\Dedicated Usage",
+            "\GPU Process Memory(pid_${ProcessId}_*)\Shared Usage",
+            "\GPU Engine(pid_${ProcessId}_*_engtype_*)\Utilization Percentage"
+        ) -ErrorAction Stop
+        $counterSamples = @($counter.CounterSamples)
+        $dedicated = @($counterSamples | Where-Object Path -Like '*\dedicated usage')
+        $shared = @($counterSamples | Where-Object Path -Like '*\shared usage')
+        $decode = @($counterSamples | Where-Object Path -Like '*engtype_videodecode*')
+        $threeD = @($counterSamples | Where-Object Path -Like '*engtype_3d*')
+        $processGpu = [pscustomobject]@{
+            DedicatedBytes = [long](($dedicated | Measure-Object CookedValue -Sum).Sum)
+            SharedBytes = [long](($shared | Measure-Object CookedValue -Sum).Sum)
+            VideoDecodePercent = [double](($decode | Measure-Object CookedValue -Sum).Sum)
+            ThreeDPercent = [double](($threeD | Measure-Object CookedValue -Sum).Sum)
+        }
+    } catch { $processGpu = $null }
     $gpu = $null
     if ($NvidiaSmi) {
         try {
@@ -156,6 +229,14 @@ function Get-NativeDvMetricSample {
         WorkingSetBytes = [long]$process.WorkingSet64
         PrivateBytes = [long]$process.PrivateMemorySize64
         PagedMemoryBytes = [long]$process.PagedMemorySize64
+        IoReadOperationCount = if ($io) { [uint64]$io.ReadOperationCount } else { $null }
+        IoWriteOperationCount = if ($io) { [uint64]$io.WriteOperationCount } else { $null }
+        IoReadTransferBytes = if ($io) { [uint64]$io.ReadTransferBytes } else { $null }
+        IoWriteTransferBytes = if ($io) { [uint64]$io.WriteTransferBytes } else { $null }
+        ProcessGpuDedicatedBytes = if ($processGpu) { $processGpu.DedicatedBytes } else { $null }
+        ProcessGpuSharedBytes = if ($processGpu) { $processGpu.SharedBytes } else { $null }
+        ProcessGpuVideoDecodePercent = if ($processGpu) { $processGpu.VideoDecodePercent } else { $null }
+        ProcessGpuThreeDPercent = if ($processGpu) { $processGpu.ThreeDPercent } else { $null }
         GpuUtilizationPercent = if ($gpu) { $gpu.GpuUtilizationPercent } else { $null }
         DecoderUtilizationPercent = if ($gpu) { $gpu.DecoderUtilizationPercent } else { $null }
         GpuMemoryUsedMiB = if ($gpu) { $gpu.GpuMemoryUsedMiB } else { $null }
@@ -259,6 +340,8 @@ if (-not $SkipClassification) {
 }
 
 $process = $null
+$mpvNativeProcess = $null
+$finalProcessIo = $null
 $pipe = $null
 $reader = $null
 $writer = $null
@@ -307,6 +390,8 @@ try {
     if (-not $videoParams) { throw 'mpv did not expose video-params within 30 seconds.' }
     $snapshots.Launch = Get-NativeDvIpcSnapshot -Ipc $ipc
     $mpvPid = [int]$snapshots.Launch.pid
+    $mpvNativeProcess = Get-Process -Id $mpvPid -ErrorAction Stop
+    [void]$mpvNativeProcess.Handle
     $nvidia = (Get-Command nvidia-smi -ErrorAction SilentlyContinue).Source
     $metrics.Add((Get-NativeDvMetricSample -ProcessId $mpvPid -Phase 'launch' -NvidiaSmi $nvidia))
     Add-NativeDvEvent -Phase 'launch' -Event 'ready' -Data @{ Pid = $mpvPid; Milliseconds = $readyWatch.ElapsedMilliseconds }
@@ -371,11 +456,15 @@ try {
     Write-NativeDvJson -Value (Test-NativeDvSourceIdentity -Path $source -ExpectedIdentity $sourceIdentity) -Path (Join-Path $run 'source-identity-after-seeks.json')
     [void](& $ipc @('quit'))
     if (-not $process.WaitForExit(15000)) { throw 'mpv did not exit after IPC quit.' }
+    $finalProcessIo = Get-NativeDvProcessIo -Process $mpvNativeProcess
     Add-NativeDvEvent -Phase 'exit' -Event 'completed' -Data @{ ExitCode = $process.ExitCode }
 } catch {
     $playbackError = $_
     Add-NativeDvEvent -Phase 'error' -Event 'exception' -Data @{ Message = $_.Exception.Message; Type = $_.Exception.GetType().FullName }
 } finally {
+    # Read the counters while the cached handle is still valid, before the finally
+    # block's cleanup can close it, and before a kill discards the process.
+    if (-not $finalProcessIo -and $mpvNativeProcess) { $finalProcessIo = Get-NativeDvProcessIo -Process $mpvNativeProcess }
     if ($writer) { $writer.Dispose() }
     if ($reader) { $reader.Dispose() }
     if ($pipe) { $pipe.Dispose() }
@@ -386,6 +475,7 @@ try {
     Write-NativeDvJson -Value $snapshots -Path (Join-Path $run 'ipc-snapshots.json')
     Write-NativeDvJson -Value @($seeks.ToArray()) -Path (Join-Path $run 'seeks.json')
     if ($capture) { Write-NativeDvJson -Value $capture -Path (Join-Path $run 'capture.json') }
+    if ($finalProcessIo) { Write-NativeDvJson -Value $finalProcessIo -Path (Join-Path $run 'process-io-final.json') }
     $logText = if (Test-Path -LiteralPath $invocation.LogPath) { Get-Content -LiteralPath $invocation.LogPath -Raw } else { '' }
     $runtimeEvidence = Get-NativeDvRuntimeEvidence -LogText $logText -RequestedEnhancementLayer ($EnhancementLayer -eq 'yes') -RequestedHardwareDecoder $HardwareDecoder
     $summaryText = if ($classification) { [string]$classification.DoviToolSummary.StandardOutput + [string]$classification.DoviToolSummary.StandardError } else { '' }
@@ -403,6 +493,13 @@ try {
         [pscustomobject]@{ Path = $stablePath; Length = $item.Length; LastWriteTimeUtc = $item.LastWriteTimeUtc; Sha256 = (Get-FileHash -LiteralPath $stablePath -Algorithm SHA256).Hash.ToLowerInvariant() }
     } else { $null }
     Write-NativeDvJson -Value $stableAfter -Path (Join-Path $run 'stable-runtime-after.json')
+    $launchSnapshot = if ($snapshots.Contains('Launch')) { $snapshots.Launch } else { $null }
+    $pipelineState = Get-NativeDvPipelineState -RuntimeEvidence $runtimeEvidence -Invocation $invocation `
+        -IpcSnapshot $launchSnapshot -FilesystemDelta $filesystemDelta -ProcessIo $finalProcessIo `
+        -SourceClassification $finalClassification.MelFel
+    Write-NativeDvJson -Value $pipelineState -Path (Join-Path $run 'pipeline-state.json')
+    $zeroScratch = Test-NativeDvZeroMediaScratch -FilesystemDelta $filesystemDelta -ProcessIo $finalProcessIo
+    Write-NativeDvJson -Value $zeroScratch -Path (Join-Path $run 'zero-media-scratch.json')
     $result = [ordered]@{
         RunId = $RunId
         RunDirectory = $run
@@ -412,8 +509,11 @@ try {
         StableRuntimeMatches = ($null -eq $stable -and $null -eq $stableAfter) -or ($stable -and $stableAfter -and $stable.Sha256 -eq $stableAfter.Sha256 -and $stable.Length -eq $stableAfter.Length -and $stable.LastWriteTimeUtc -eq $stableAfter.LastWriteTimeUtc)
         Filesystem = $filesystemDelta
         RuntimeEvidence = $runtimeEvidence
+        PipelineState = $pipelineState
+        ZeroMediaScratch = $zeroScratch
         MelFel = $finalClassification.MelFel
         Capture = $capture
+        FinalProcessIo = $finalProcessIo
     }
     Write-NativeDvJson -Value $result -Path (Join-Path $run 'result.json')
 }

@@ -127,27 +127,48 @@ function Get-NativeDvRuntimeEvidence {
         [Parameter(Mandatory = $true)][string]$RequestedHardwareDecoder
     )
 
-    $decoderOpenCount = [regex]::Matches($LogText, '(?im)\[vd\].*Opening decoder hevc\s*$').Count
-    $selectedDecoders = @([regex]::Matches($LogText, '(?im)\[vd\].*Selected decoder:\s*([^\r\n]+)') | ForEach-Object { $_.Groups[1].Value.Trim() })
+    # The renderer trace is the only place this pinned runtime exposes composition
+    # state, so every pattern here is tied to the manifest-pinned mpv/libplacebo
+    # build. Nothing below may infer an observation from what was requested.
+    $decoderOpenCount = [regex]::Matches($LogText, '(?im)\[vd\][^
+]*Opening decoder hevc\s*$').Count
+    $selectedDecoders = @([regex]::Matches($LogText, '(?im)\[vd\]\s*Selected decoder:\s*([^\r\n]+)') | ForEach-Object { $_.Groups[1].Value.Trim() })
     $apiMatch = [regex]::Match($LogText, '(?im)Initialized libplacebo .*\(API v(?<api>\d+)\)')
+    $hwdecMatch = [regex]::Match($LogText, '(?im)\[vd\]\s*Using hardware decoding \((?<name>[^)]+)\)')
+    $elPairMatch = [regex]::Match($LogText, '(?im)\[vf\]\s*\[el_pair\]\s*(?<format>[^\r\n]+)')
     $softwareFallback = $LogText -match '(?im)\[vd\].*Using software decoding\.'
-    $hardwareObserved = $LogText -match '(?im)Using hardware decoding'
     $nlqShader = $LogText -match '(?im)sh_dovi_compose_nlq'
-    $enhancementGpu = $LogText -match '(?im)Spent .* on shader:.*enhancement layer'
+    $enhancementGpu = $LogText -match '(?im)Spent [0-9.]+ ms on shader:[^\r\n]*enhancement layer'
+    # A renderer that never initialised cannot support a negative composition
+    # claim; without this the absent-evidence case would read as "not composing".
+    $rendererObserved = $apiMatch.Success
+
+    # '[vo/gpu-next] Loading failed.' is emitted when gpu-next declines an optional
+    # hwdec interop driver (for example 'd3d11-egl') after another driver already
+    # succeeded. It is not a device-creation failure and must never be reported as
+    # one. Count it separately so the benign signal is preserved, not discarded.
+    $interopProbeFailures = [regex]::Matches($LogText, "(?im)\[vo/gpu-next\]\s*Loading failed\.\s*$").Count
+    $deviceFailure = $LogText -match '(?im)(Could not create device|Failed to create (the )?(d3d11 |vulkan )?device|Failed to initialize [^\r\n]*(device|context))'
+
     [pscustomobject]@{
         RequestedEnhancementLayer = $RequestedEnhancementLayer
         RequestedHardwareDecoder = $RequestedHardwareDecoder
+        RendererObserved = [bool]$rendererObserved
         Profile7Splitter = [bool]($LogText -match 'Dolby Vision Profile 7 splitter: BL stream \d+, virtual EL stream \d+ \(dependent_track\)')
         HevcDecoderOpenCount = $decoderOpenCount
         SelectedDecoders = [string[]]$selectedDecoders
-        ElPair = [bool]($LogText -match '(?im)\[vf\].*\[el_pair\]')
+        ElPair = [bool]$elPairMatch.Success
+        ElPairFormat = if ($elPairMatch.Success) { $elPairMatch.Groups['format'].Value.Trim() } else { $null }
         LibplaceboApi = if ($apiMatch.Success) { [int]$apiMatch.Groups['api'].Value } else { $null }
         NlqCompositionShader = [bool]$nlqShader
         EnhancementLayerGpuStage = [bool]$enhancementGpu
-        CompositionActive = [bool]($RequestedEnhancementLayer -and $nlqShader -and $enhancementGpu)
-        HardwareDecodingObserved = [bool]$hardwareObserved
+        # Purely observed. The request is reported alongside it, never folded into it.
+        CompositionObserved = [bool]($nlqShader -and $enhancementGpu)
+        HardwareDecodingObserved = [bool]$hwdecMatch.Success
+        HardwareDecoderInUse = if ($hwdecMatch.Success) { $hwdecMatch.Groups['name'].Value.Trim() } else { $null }
         SoftwareFallbackObserved = [bool]$softwareFallback
-        DeviceCreationFailureObserved = [bool]($LogText -match '(?im)(Could not create device|Loading failed)')
+        HwdecInteropProbeFailures = $interopProbeFailures
+        RendererDeviceFailureObserved = [bool]$deviceFailure
     }
 }
 
@@ -384,9 +405,200 @@ function Test-NativeDvSourceIdentity {
     }
 }
 
+function Get-NativeDvPipelineState {
+    <#
+    .SYNOPSIS
+    Reduce a run's evidence into an explicit Requested/Observed pipeline record.
+
+    .DESCRIPTION
+    Requested values describe what the harness asked the runtime to do. Observed
+    values describe only what the runtime demonstrably did. A value that cannot be
+    established from evidence stays 'Unknown'; it is never promoted to 'Inactive'
+    or to a false boolean, because "we did not see it" and "it did not happen" are
+    different claims.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$RuntimeEvidence,
+        [Parameter(Mandatory = $true)][object]$Invocation,
+        [AllowNull()][object]$IpcSnapshot = $null,
+        [AllowNull()][object]$FilesystemDelta = $null,
+        [AllowNull()][object]$ProcessIo = $null,
+        [AllowEmptyString()][string]$SourceClassification = 'Unknown'
+    )
+
+    $rendererRan = [bool]$RuntimeEvidence.RendererObserved
+    $decoders = @($RuntimeEvidence.SelectedDecoders)
+    $degradation = [Collections.Generic.List[string]]::new()
+
+    # Composition is the FEL claim itself, so it gets the strictest treatment.
+    $composition = if (-not $rendererRan) {
+        'Unknown'
+    } elseif ($RuntimeEvidence.CompositionObserved) {
+        'Active'
+    } else {
+        'Inactive'
+    }
+
+    $pairing = if ($RuntimeEvidence.ElPair) {
+        'Active'
+    } elseif (-not $rendererRan) {
+        'Unknown'
+    } else {
+        'Absent'
+    }
+
+    # Two HEVC decoder instances is the BL+EL signature for this pinned build.
+    $blDecoder = if ($decoders.Count -ge 1) { $decoders[0] } else { $null }
+    $elDecoder = if ($decoders.Count -ge 2) { $decoders[1] } else { $null }
+    if ($rendererRan -and $decoders.Count -lt 2) {
+        $degradation.Add('Fewer than two HEVC decoder instances were observed; the enhancement layer was not separately decoded.')
+    }
+
+    $hardwareSurfaces = if ($RuntimeEvidence.SoftwareFallbackObserved) {
+        'Software'
+    } elseif ($RuntimeEvidence.HardwareDecodingObserved) {
+        'Active'
+    } else {
+        'Unknown'
+    }
+    if ($RuntimeEvidence.SoftwareFallbackObserved) {
+        $degradation.Add('Software decoding fallback was observed.')
+    }
+    if ($RuntimeEvidence.RendererDeviceFailureObserved) {
+        $degradation.Add('A renderer device or context creation failure was observed.')
+    }
+    if ($RuntimeEvidence.RequestedEnhancementLayer -and $composition -eq 'Inactive') {
+        $degradation.Add('Full enhancement-layer composition was requested but the renderer did not compose it; this is a base-layer-only result.')
+    }
+
+    # RPU state comes from container/splitter evidence, not from composition: a run
+    # that suppresses composition still carries RPU metadata.
+    $rpu = if ($RuntimeEvidence.Profile7Splitter) { 'Present' } else { 'Unknown' }
+
+    $mediaScratchBytes = $null
+    $boundedStateBytes = $null
+    $unknownBytes = $null
+    if ($null -ne $FilesystemDelta) {
+        $mediaScratchBytes = [long]$FilesystemDelta.MediaPayloadBytes
+        $boundedStateBytes = [long]$FilesystemDelta.BoundedStateBytes
+        $unknownBytes = [long]$FilesystemDelta.UnknownBytes
+    }
+    $processWriteBytes = $null
+    if ($null -ne $ProcessIo) { $processWriteBytes = [long]$ProcessIo.WriteTransferBytes }
+
+    $graphicsApi = $null
+    $graphicsContext = $null
+    $hwdecCurrent = $null
+    if ($null -ne $IpcSnapshot) {
+        $names = @($IpcSnapshot.PSObject.Properties.Name)
+        if ($names -contains 'gpu-api') { $graphicsApi = $IpcSnapshot.'gpu-api' }
+        if ($names -contains 'gpu-context') { $graphicsContext = $IpcSnapshot.'gpu-context' }
+        if ($names -contains 'hwdec-current') { $hwdecCurrent = $IpcSnapshot.'hwdec-current' }
+    }
+
+    [pscustomobject]@{
+        SchemaVersion = 1
+        Requested = [pscustomobject][ordered]@{
+            SourcePath = $Invocation.SourcePath
+            SourceClassification = $SourceClassification
+            NativeProfile7Playback = $true
+            EnhancementLayer = [bool]$Invocation.EnhancementLayer
+            RuntimeExecutable = $Invocation.Executable
+            Renderer = 'gpu-next'
+            GpuApi = $Invocation.GpuApi
+            GpuContext = $Invocation.GpuContext
+            HardwareDecoder = $Invocation.HardwareDecoder
+        }
+        Observed = [pscustomobject][ordered]@{
+            RendererObserved = $rendererRan
+            Renderer = if ($rendererRan) { 'gpu-next' } else { $null }
+            GraphicsApi = $graphicsApi
+            GraphicsContext = $graphicsContext
+            LibplaceboApi = $RuntimeEvidence.LibplaceboApi
+            Profile7Splitter = [bool]$RuntimeEvidence.Profile7Splitter
+            DecoderInstances = [int]$RuntimeEvidence.HevcDecoderOpenCount
+            BlDecoder = $blDecoder
+            ElDecoder = $elDecoder
+            BlElPairing = $pairing
+            BlElPairFormat = $RuntimeEvidence.ElPairFormat
+            RpuState = $rpu
+            FelComposition = $composition
+            HardwareSurfaces = $hardwareSurfaces
+            HardwareDecoderInUse = $RuntimeEvidence.HardwareDecoderInUse
+            HwdecCurrent = $hwdecCurrent
+            HwdecInteropProbeFailures = [int]$RuntimeEvidence.HwdecInteropProbeFailures
+            MediaScratchBytes = $mediaScratchBytes
+            BoundedStateBytes = $boundedStateBytes
+            UnknownWriteBytes = $unknownBytes
+            ProcessWriteBytes = $processWriteBytes
+            Degradation = [string[]]$degradation.ToArray()
+        }
+    }
+}
+
+function Test-NativeDvZeroMediaScratch {
+    <#
+    .SYNOPSIS
+    Decide the zero-media-scratch claim from two independent measurements.
+
+    .DESCRIPTION
+    A directory snapshot taken before and after a run cannot see a media-sized file
+    that is created and deleted while the run is in flight. The process write-byte
+    counter can: it accumulates every byte the process wrote anywhere, including to
+    files that no longer exist. Both must agree before the claim is made, and a
+    missing process counter downgrades the result to Unknown rather than passing it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$FilesystemDelta,
+        [AllowNull()][object]$ProcessIo = $null,
+        [long]$ProcessWriteCeilingBytes = 33554432
+    )
+
+    $reasons = [Collections.Generic.List[string]]::new()
+    $mediaBytes = [long]$FilesystemDelta.MediaPayloadBytes
+    $mediaCount = @($FilesystemDelta.MediaPayload).Count
+    $unknownCount = @($FilesystemDelta.Unknown).Count
+    if ($mediaCount -gt 0) { $reasons.Add("$mediaCount media-payload file(s) totalling $mediaBytes bytes were created.") }
+    if ($unknownCount -gt 0) { $reasons.Add("$unknownCount unclassified write(s) were observed.") }
+
+    $processWriteBytes = $null
+    if ($null -ne $ProcessIo) { $processWriteBytes = [long]$ProcessIo.WriteTransferBytes }
+    if ($null -eq $processWriteBytes) {
+        $reasons.Add('Process write-byte counters were unavailable, so transient media-sized writes could not be excluded.')
+    } elseif ($processWriteBytes -gt $ProcessWriteCeilingBytes) {
+        $reasons.Add("The process wrote $processWriteBytes bytes, above the $ProcessWriteCeilingBytes-byte bounded-state ceiling.")
+    }
+
+    $snapshotClean = ($mediaCount -eq 0 -and $unknownCount -eq 0)
+    $processClean = ($null -ne $processWriteBytes -and $processWriteBytes -le $ProcessWriteCeilingBytes)
+    $result = if ($snapshotClean -and $processClean) {
+        'Zero'
+    } elseif (-not $snapshotClean) {
+        'Violated'
+    } else {
+        'Unknown'
+    }
+
+    [pscustomobject]@{
+        Result = $result
+        SnapshotClean = $snapshotClean
+        ProcessCounterClean = $processClean
+        MediaPayloadBytes = $mediaBytes
+        MediaPayloadCount = $mediaCount
+        UnknownCount = $unknownCount
+        ProcessWriteBytes = $processWriteBytes
+        ProcessWriteCeilingBytes = $ProcessWriteCeilingBytes
+        Reasons = [string[]]$reasons.ToArray()
+    }
+}
+
 Export-ModuleMember -Function @(
     'New-NativeDvInvocation',
     'Get-NativeDvRuntimeEvidence',
+    'Get-NativeDvPipelineState',
+    'Test-NativeDvZeroMediaScratch',
     'Get-NativeDvMelFelClassification',
     'Get-NativeDvFileSnapshot',
     'Compare-NativeDvFileSnapshot',

@@ -6,13 +6,17 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $root 'scripts\NativeDvExperiment.psm1'
 
+$script:assertions = 0
+
 function Assert-True {
     param([bool]$Condition, [string]$Message)
+    $script:assertions++
     if (-not $Condition) { throw "ASSERT: $Message" }
 }
 
 function Assert-Equal {
     param($Expected, $Actual, [string]$Message)
+    $script:assertions++
     if ($Expected -ne $Actual) {
         throw "ASSERT: $Message (expected '$Expected', actual '$Actual')"
     }
@@ -106,6 +110,104 @@ try {
     $melClassification = Get-NativeDvMelFelClassification -DoviToolSummary 'Profile: 7 (MEL)' -RuntimeEvidence $unknownEvidence
     Assert-Equal 'MEL' $melClassification.MelFel 'documented MEL summary must classify MEL'
 
+    # --- Renderer diagnostics must not manufacture failures -------------------
+    # gpu-next logs '[vo/gpu-next] Loading failed.' when it declines an optional
+    # hwdec interop driver after another already succeeded. Real proof runs emit it
+    # three times while hardware decoding works perfectly, so treating it as a
+    # device-creation failure reports a broken renderer on a healthy run.
+    $benignInteropLog = @'
+[   0.285][v][vd] Looking at hwdec hevc-d3d11va...
+[   0.285][v][vo/gpu-next] Loading hwdec drivers for format: 'd3d11'
+[   0.285][v][vo/gpu-next] Loading hwdec driver 'd3d11va'
+[   0.286][v][vo/gpu-next] Loading hwdec driver 'd3d11-egl'
+[   0.286][v][vo/gpu-next] Loading failed.
+[   0.318][i][vd] Using hardware decoding (d3d11va).
+[   0.280][v][vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)
+'@
+    $benign = Get-NativeDvRuntimeEvidence -LogText $benignInteropLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    Assert-True (-not $benign.RendererDeviceFailureObserved) 'declining an optional hwdec interop driver is not a device failure'
+    Assert-Equal 1 $benign.HwdecInteropProbeFailures 'the benign interop probe result must still be counted, not discarded'
+    Assert-Equal 'd3d11va' $benign.HardwareDecoderInUse 'the hardware decoder actually in use must be parsed'
+    Assert-True $benign.HardwareDecodingObserved 'hardware decoding must be observed on this log'
+
+    $realFailureLog = '[vo/gpu-next] Could not create device.'
+    $realFailure = Get-NativeDvRuntimeEvidence -LogText $realFailureLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    Assert-True $realFailure.RendererDeviceFailureObserved 'a genuine device-creation failure must still be reported'
+
+    # --- Observed state must never be inferred from the request ----------------
+    $requestedButNotComposed = Get-NativeDvRuntimeEvidence -LogText $benignInteropLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    Assert-True (-not $requestedButNotComposed.CompositionObserved) 'requesting the enhancement layer must not imply composition'
+    $composedLog = $felLog + "`n" + '[vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)'
+    $composedNotRequested = Get-NativeDvRuntimeEvidence -LogText $composedLog -RequestedEnhancementLayer $false -RequestedHardwareDecoder 'd3d11va'
+    Assert-True $composedNotRequested.CompositionObserved 'observed composition must be reported even when it was not requested'
+
+    # --- Tri-state pipeline state ---------------------------------------------
+    $fakeInvocation = [pscustomobject]@{
+        SourcePath = 'C:\authored\source.mkv'; Executable = 'C:\pinned\mpv.com'; EnhancementLayer = $true
+        GpuApi = 'd3d11'; GpuContext = 'd3d11'; HardwareDecoder = 'd3d11va'
+    }
+    $silentEvidence = Get-NativeDvRuntimeEvidence -LogText '' -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    $silentState = Get-NativeDvPipelineState -RuntimeEvidence $silentEvidence -Invocation $fakeInvocation
+    Assert-Equal 'Unknown' $silentState.Observed.FelComposition 'an absent renderer log must stay Unknown, never Inactive'
+    Assert-Equal 'Unknown' $silentState.Observed.BlElPairing 'pairing must stay Unknown when the renderer never ran'
+    Assert-Equal 'Unknown' $silentState.Observed.HardwareSurfaces 'hardware-surface state must stay Unknown without evidence'
+    Assert-Equal 'Unknown' $silentState.Observed.RpuState 'RPU state must stay Unknown without splitter evidence'
+    Assert-True $silentState.Requested.EnhancementLayer 'the request must still be recorded when nothing was observed'
+
+    $onEvidence = Get-NativeDvRuntimeEvidence -LogText $composedLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    $onState = Get-NativeDvPipelineState -RuntimeEvidence $onEvidence -Invocation $fakeInvocation -SourceClassification 'FEL'
+    Assert-Equal 'Active' $onState.Observed.FelComposition 'observed NLQ composition must report Active'
+    Assert-Equal 'Active' $onState.Observed.BlElPairing 'observed el_pair must report Active pairing'
+    Assert-Equal 'Present' $onState.Observed.RpuState 'the Profile 7 splitter establishes RPU presence'
+    Assert-Equal 2 $onState.Observed.DecoderInstances 'both decoder instances must reach the observed model'
+    Assert-True ($null -ne $onState.Observed.ElDecoder) 'the enhancement-layer decoder must be named'
+    Assert-Equal 0 $onState.Observed.Degradation.Count 'a fully composed run must report no degradation'
+
+    # A requested FEL run that the renderer did not compose is a base-layer-only
+    # result and must say so rather than inheriting the FEL label from the request.
+    $blOnlyLog = @'
+[   0.016][v][mkv] Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track).
+[   0.285][v][vd] Opening decoder hevc
+[   0.286][v][vd] Selected decoder: hevc - HEVC (High Efficiency Video Coding)
+[   0.318][i][vd] Using hardware decoding (d3d11va).
+[   0.280][v][vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)
+'@
+    $blOnlyEvidence = Get-NativeDvRuntimeEvidence -LogText $blOnlyLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    $blOnlyState = Get-NativeDvPipelineState -RuntimeEvidence $blOnlyEvidence -Invocation $fakeInvocation -SourceClassification 'FEL'
+    Assert-Equal 'Inactive' $blOnlyState.Observed.FelComposition 'a running renderer without NLQ must report Inactive composition'
+    Assert-Equal 'Absent' $blOnlyState.Observed.BlElPairing 'a running renderer without el_pair must report Absent pairing'
+    Assert-Equal 1 $blOnlyState.Observed.DecoderInstances 'a single decoder instance must be reported honestly'
+    Assert-True ($null -eq $blOnlyState.Observed.ElDecoder) 'no enhancement-layer decoder may be invented'
+    Assert-True (@($blOnlyState.Observed.Degradation) -join ' ' -match 'base-layer-only') 'requested-but-uncomposed FEL must be named a base-layer-only result'
+    Assert-True (@($blOnlyState.Observed.Degradation) -join ' ' -match 'Fewer than two') 'a missing second decoder must be named as degradation'
+
+    $softwareLog = $blOnlyLog + "`n" + '[   0.4][v][vd] Using software decoding.'
+    $softwareEvidence = Get-NativeDvRuntimeEvidence -LogText $softwareLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'd3d11va'
+    $softwareState = Get-NativeDvPipelineState -RuntimeEvidence $softwareEvidence -Invocation $fakeInvocation
+    Assert-Equal 'Software' $softwareState.Observed.HardwareSurfaces 'software fallback must be visible in the observed model'
+    Assert-True (@($softwareState.Observed.Degradation) -join ' ' -match 'Software decoding fallback') 'software fallback must be named as degradation'
+
+    # --- Zero-media-scratch gate needs two independent measurements ------------
+    $cleanDelta = [pscustomobject]@{ MediaPayloadBytes = 0L; MediaPayload = @(); Unknown = @(); BoundedStateBytes = 4771115L; UnknownBytes = 0L }
+    $noCounters = Test-NativeDvZeroMediaScratch -FilesystemDelta $cleanDelta -ProcessIo $null
+    Assert-Equal 'Unknown' $noCounters.Result 'a clean snapshot alone cannot prove zero scratch; transient writes are invisible to it'
+    Assert-True (@($noCounters.Reasons) -join ' ' -match 'transient') 'the missing-counter limitation must be stated'
+
+    $withCounters = Test-NativeDvZeroMediaScratch -FilesystemDelta $cleanDelta -ProcessIo ([pscustomobject]@{ WriteTransferBytes = 4731122L })
+    Assert-Equal 'Zero' $withCounters.Result 'a clean snapshot plus a bounded process write total proves zero media scratch'
+    Assert-Equal 4731122 $withCounters.ProcessWriteBytes 'the process write total must be reported'
+
+    $bigWrite = Test-NativeDvZeroMediaScratch -FilesystemDelta $cleanDelta -ProcessIo ([pscustomobject]@{ WriteTransferBytes = 900000000L })
+    Assert-Equal 'Unknown' $bigWrite.Result 'a large process write total must defeat the zero-scratch claim even when the snapshot is clean'
+
+    $dirtyDelta = [pscustomobject]@{
+        MediaPayloadBytes = 4096L
+        MediaPayload = @([pscustomobject]@{ Path = 'C:\run\shadow.hevc' })
+        Unknown = @(); BoundedStateBytes = 0L; UnknownBytes = 0L
+    }
+    $violated = Test-NativeDvZeroMediaScratch -FilesystemDelta $dirtyDelta -ProcessIo ([pscustomobject]@{ WriteTransferBytes = 4096L })
+    Assert-Equal 'Violated' $violated.Result 'an observed media payload must fail the gate outright'
+
     if ($PSVersionTable.PSVersion.Major -ge 7) {
     $runnerPath = Join-Path $root 'scripts\Invoke-NativeDvExperiment.ps1'
     $orchestrationRoot = Join-Path $tempRoot 'orchestration'
@@ -182,7 +284,7 @@ try {
     Assert-True (-not $changedSentinel.Matches) 'changed sentinel content must fail'
     Assert-True ($changedSentinel.Differences -contains 'MiddleSha256') 'middle sentinel difference must be named'
 
-    Write-Host "Native Dolby Vision experiment contract: PASS ($($PSVersionTable.PSVersion))"
+    Write-Host "Native Dolby Vision experiment contract: PASS ($script:assertions assertions, $($PSVersionTable.PSVersion))"
 } finally {
     $fullTemp = [IO.Path]::GetFullPath($tempRoot)
     $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
