@@ -242,6 +242,96 @@ try {
     Assert-Equal 1 $comparison.BoundingBox.Left 'pixel comparison must report changed-pixel bounds'
     Assert-Equal 0 $comparison.BoundingBox.Top 'pixel comparison must report changed-pixel bounds'
     Assert-True (Test-Path -LiteralPath $comparisonPath) 'pixel comparison must persist machine-readable evidence'
+
+    # The proof captures are 16-bit RGBA, but the fixture above is an 8-bit
+    # System.Drawing bitmap, so the decode path that actually carries the
+    # milestone's rendered claim was untested. Build 16-bit RGBA PNGs directly.
+    # Stored (uncompressed) deflate blocks are used so this works on both
+    # PowerShell 5.1 and 7 without depending on ZLibStream.
+    function New-NativeDvTestPng16 {
+        param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][uint16[]]$Pixels,
+              [Parameter(Mandatory = $true)][int]$Width, [Parameter(Mandatory = $true)][int]$Height)
+
+        # PowerShell parses an eight-hex-digit literal as a signed int, so
+        # 0xFFFFFFFF is -1. Use long literals and mask explicitly throughout.
+        $mask = [long]0xFFFFFFFFL
+        $crcTable = New-Object long[] 256
+        for ($n = 0; $n -lt 256; $n++) {
+            $c = [long]$n
+            for ($k = 0; $k -lt 8; $k++) {
+                if ($c -band 1L) { $c = ((0xEDB88320L -bxor ($c -shr 1)) -band $mask) } else { $c = (($c -shr 1) -band $mask) }
+            }
+            $crcTable[$n] = $c
+        }
+        function Get-Crc32 {
+            param([byte[]]$Bytes)
+            $c = $mask
+            foreach ($b in $Bytes) { $c = (($crcTable[[int](($c -bxor $b) -band 0xFF)] -bxor ($c -shr 8)) -band $mask) }
+            return [uint32](($c -bxor $mask) -band $mask)
+        }
+        # The comma operator binds tighter than -band, so each element needs its own parentheses.
+        function Get-BigEndian { param([uint32]$Value) return [byte[]]@((($Value -shr 24) -band 0xFF), (($Value -shr 16) -band 0xFF), (($Value -shr 8) -band 0xFF), ($Value -band 0xFF)) }
+        function New-Chunk {
+            param([string]$Type, [byte[]]$Data)
+            $typeBytes = [Text.Encoding]::ASCII.GetBytes($Type)
+            $payload = $typeBytes + $Data
+            return (Get-BigEndian ([uint32]$Data.Length)) + $payload + (Get-BigEndian (Get-Crc32 $payload))
+        }
+
+        # Raw scanlines: filter byte 0, then big-endian 16-bit RGBA samples.
+        $raw = [Collections.Generic.List[byte]]::new()
+        $index = 0
+        for ($y = 0; $y -lt $Height; $y++) {
+            [void]$raw.Add(0)
+            for ($x = 0; $x -lt ($Width * 4); $x++) {
+                $sample = $Pixels[$index]; $index++
+                [void]$raw.Add([byte](($sample -shr 8) -band 0xFF))
+                [void]$raw.Add([byte]($sample -band 0xFF))
+            }
+        }
+        $rawBytes = $raw.ToArray()
+
+        # zlib container around a single stored deflate block.
+        $adlerA = [uint32]1; $adlerB = [uint32]0
+        foreach ($b in $rawBytes) { $adlerA = ($adlerA + $b) % 65521; $adlerB = ($adlerB + $adlerA) % 65521 }
+        $len = $rawBytes.Length
+        $zlib = [Collections.Generic.List[byte]]::new()
+        [void]$zlib.Add(0x78); [void]$zlib.Add(0x01)
+        [void]$zlib.Add(0x01)
+        [void]$zlib.Add([byte]($len -band 0xFF)); [void]$zlib.Add([byte](($len -shr 8) -band 0xFF))
+        [void]$zlib.Add([byte]((-bnot $len) -band 0xFF)); [void]$zlib.Add([byte](((-bnot $len) -shr 8) -band 0xFF))
+        $zlib.AddRange($rawBytes)
+        $zlib.AddRange([byte[]](Get-BigEndian ([uint32](($adlerB -shl 16) -bor $adlerA))))
+
+        $ihdr = (Get-BigEndian ([uint32]$Width)) + (Get-BigEndian ([uint32]$Height)) + [byte[]]@(16, 6, 0, 0, 0)
+        $png = [byte[]]@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) +
+            (New-Chunk 'IHDR' $ihdr) + (New-Chunk 'IDAT' $zlib.ToArray()) + (New-Chunk 'IEND' @())
+        [IO.File]::WriteAllBytes($Path, [byte[]]$png)
+    }
+
+    # 2x1 RGBA. Pixel 0 is identical in both; pixel 1 differs by 4096 in green
+    # only. Alpha differs deliberately and must be ignored: the comparison scores
+    # colour channels only, so an alpha-only change is not a rendered difference.
+    $wide16Off = Join-Path $tempRoot 'off16.png'
+    $wide16On = Join-Path $tempRoot 'on16.png'
+    New-NativeDvTestPng16 -Path $wide16Off -Width 2 -Height 1 -Pixels ([uint16[]](1000, 2000, 3000, 65535,  1000, 2000, 3000, 65535))
+    New-NativeDvTestPng16 -Path $wide16On  -Width 2 -Height 1 -Pixels ([uint16[]](1000, 2000, 3000, 12345,  1000, 6096, 3000, 65535))
+    $compare16Path = Join-Path $tempRoot 'comparison16.json'
+    $compare16 = & (Join-Path $root 'scripts\Compare-NativeDvCaptures.ps1') -EnhancementOn $wide16On -EnhancementOff $wide16Off -OutputPath $compare16Path
+    Assert-Equal 16 $compare16.BitDepth '16-bit captures must decode at 16-bit depth'
+    Assert-Equal 65535 $compare16.SampleMaximum '16-bit sample maximum must be reported'
+    Assert-Equal 2 $compare16.PixelCount '16-bit geometry must be decoded correctly'
+    Assert-Equal 1 $compare16.ChangedPixelCount 'an alpha-only change is not a rendered colour difference'
+    Assert-Equal 4096 $compare16.MaximumChannelDelta '16-bit channel deltas must not be truncated to 8 bits'
+    Assert-Equal 1 $compare16.BoundingBox.Left 'the changed 16-bit pixel must be located'
+
+    # A capture that differs nowhere must score zero, which is what the
+    # determinism control depends on being able to detect.
+    $identical16 = Join-Path $tempRoot 'identical16.png'
+    New-NativeDvTestPng16 -Path $identical16 -Width 2 -Height 1 -Pixels ([uint16[]](1000, 2000, 3000, 65535,  1000, 2000, 3000, 65535))
+    $controlLike = & (Join-Path $root 'scripts\Compare-NativeDvCaptures.ps1') -EnhancementOn $identical16 -EnhancementOff $wide16Off -OutputPath (Join-Path $tempRoot 'comparison16-control.json')
+    Assert-Equal 0 $controlLike.ChangedPixelCount 'identical captures must score zero changed pixels'
+    Assert-Equal 0 $controlLike.MaximumChannelDelta 'identical captures must score zero maximum delta'
     }
 
     $monitored = Join-Path $tempRoot 'monitored'

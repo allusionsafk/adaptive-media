@@ -93,6 +93,13 @@ expected shape of an NLQ residual contribution: broad and low-amplitude rather
 than localised. Against a bit-identical control, a non-zero difference of this
 size cannot be renderer noise.
 
+Both figures are scored over the three colour channels only; the alpha channel is
+excluded from the sum and from the denominator, so an alpha-only change is not
+counted as a rendered difference. The changed-pixel count and the maximum channel
+delta were reproduced exactly by an independently written PNG decoder, and the
+16-bit decode path now has its own regression covering delta truncation and alpha
+exclusion.
+
 An independent non-log corroboration: dedicated per-process GPU memory is
 approximately 1,253.8 MiB with the enhancement layer enabled and 1,231.6 MiB with
 it disabled, a reproducible ~22 MiB difference consistent with enhancement-layer
@@ -111,10 +118,22 @@ directory snapshot cannot see a media-sized file created and deleted mid-run.
 
 The process write total is the stronger measurement: it accumulates every byte
 the mpv process wrote anywhere, including to files that no longer exist. At
-roughly 6 MB it is four orders of magnitude below the 83.88 GB source, and it is
-fully accounted for by the diagnostic log plus one lossless evidence PNG. No
+roughly 6 MB it is four orders of magnitude below the 83.88 GB source. No
 extracted HEVC, converted HEVC, temporary Matroska, shadow transcode, or growing
 media cache was created in any run.
+
+Attributing that total bounds hidden writes tightly. The diagnostic log plus the
+single evidence PNG account for 6,339,050 of 6,414,924 bytes on `proof2-fel-on-a`,
+6,330,770 of 6,406,966 on `proof2-fel-on-b`, and 5,718,920 of 5,795,100 on
+`proof2-fel-off`. At most about 76 KB per run is unattributed, and that residual
+is near-identical across all three runs, which is the signature of fixed
+filesystem overhead rather than of media content. The gate additionally refuses
+any run whose process write total exceeds a 32 MiB ceiling.
+
+A forced-failure run was also exercised: an unreachable capture timestamp made
+playback throw with a live mpv process. The run still recorded the error, the
+process write counters, the source identity check, the stable-runtime check, and
+the zero-scratch verdict, and left no mpv process behind.
 
 Runs that predate the process counters correctly report `Unknown` rather than
 `Zero`, because a clean snapshot alone cannot exclude transient writes.
@@ -130,7 +149,7 @@ schedule (23 samples per run).
 | Metric | FEL on (`proof2-fel-on-a`) | FEL off |
 | --- | --- | --- |
 | Working set | 401–564 MiB, +21.9 MiB first→last | 381–539 MiB, +21.3 MiB |
-| Private bytes | 1,617–1,801 MiB, +14.0 MiB | 1,602–1,780 MiB, +14.3 MiB |
+| Private bytes | 1,617–1,801 MiB, +14.0 MiB | 1,602–1,780 MiB, +14.2 MiB |
 | GPU dedicated (process) | 1,253.5–1,261.4 MiB, +7.6 MiB | 1,231.6–1,239.2 MiB, +7.6 MiB |
 | GPU shared (process) | 128.9–279.1 MiB | 128.1–278.0 MiB |
 | CPU, sustained | 0.232 % of 32 logical CPUs | 0.241 % |
