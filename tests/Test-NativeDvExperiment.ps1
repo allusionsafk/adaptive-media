@@ -60,6 +60,7 @@ try {
     Assert-True (-not $on.Executable.StartsWith('C:\mpv\', [StringComparison]::OrdinalIgnoreCase)) 'stable mpv must not be selected'
     Assert-True ($on.Arguments -contains '--no-config') 'no-config is mandatory'
     Assert-True ($on.Arguments -contains '--vo=gpu-next') 'gpu-next is mandatory'
+    Assert-True ($on.Arguments -contains '--hwdec=auto-safe') 'hardware decoder request must be explicit'
     Assert-True ($on.Arguments -contains '--cache-on-disk=no') 'disk cache must be disabled'
     Assert-True ($on.Arguments -contains '--gpu-shader-cache=no') 'shader cache must be disabled'
     Assert-True ($on.Arguments -contains '--save-position-on-quit=no') 'watch-later writes must be disabled'
@@ -77,6 +78,69 @@ try {
     Assert-Equal ([IO.Path]::GetFullPath($sourcePath)) $on.Arguments[$delimiter + 1] 'source path must be unchanged after delimiter'
     Assert-Equal ($delimiter + 2) $on.Arguments.Count 'source must be the final argument'
     Assert-True (-not (($on.Arguments -join "`n") -match '(?i)(extract|encode|stream-record|record-file|dump-stream|--o=|--output=)')) 'invocation must not contain extraction or output arguments'
+
+    $felLog = @'
+[mkv] Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track).
+[vd] Opening decoder hevc
+[vd] Selected decoder: hevc - HEVC
+[vd] Opening decoder hevc
+[vd] Selected decoder: hevc - HEVC
+[vf] [el_pair] 3840x2160 yuv420p10 dolbyvision/bt.2020/pq/limited/display
+[vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)
+[vo/gpu-next/libplacebo] [285] /* sh_dovi_compose_nlq */
+[vo/gpu-next/libplacebo] Spent 1.261 ms on shader: color decoding, enhancement layer
+'@
+    $runtimeEvidence = Get-NativeDvRuntimeEvidence -LogText $felLog -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'nvdec'
+    Assert-True $runtimeEvidence.Profile7Splitter 'splitter evidence must be structured'
+    Assert-Equal 2 $runtimeEvidence.HevcDecoderOpenCount 'both decoder instances must be counted'
+    Assert-True $runtimeEvidence.ElPair 'pairing evidence must be structured'
+    Assert-True $runtimeEvidence.NlqCompositionShader 'NLQ shader evidence must be structured'
+    Assert-True $runtimeEvidence.EnhancementLayerGpuStage 'GPU enhancement stage must be structured'
+    Assert-Equal 371 $runtimeEvidence.LibplaceboApi 'renderer API must be parsed'
+    $felClassification = Get-NativeDvMelFelClassification -DoviToolSummary 'Profile: 7 (FEL)' -RuntimeEvidence $runtimeEvidence
+    Assert-Equal 'FEL' $felClassification.MelFel 'independent FEL evidence must classify FEL'
+    Assert-True ($felClassification.Evidence.Count -ge 2) 'FEL classification must preserve independent evidence'
+    $unknownEvidence = Get-NativeDvRuntimeEvidence -LogText '[mkv] profile: 7, EL: 1, BL: 1' -RequestedEnhancementLayer $true -RequestedHardwareDecoder 'nvdec'
+    $unknownClassification = Get-NativeDvMelFelClassification -DoviToolSummary 'Profile: 7' -RuntimeEvidence $unknownEvidence
+    Assert-Equal 'Unknown' $unknownClassification.MelFel 'EL presence alone must not manufacture FEL'
+    $melClassification = Get-NativeDvMelFelClassification -DoviToolSummary 'Profile: 7 (MEL)' -RuntimeEvidence $unknownEvidence
+    Assert-Equal 'MEL' $melClassification.MelFel 'documented MEL summary must classify MEL'
+
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $runnerPath = Join-Path $root 'scripts\Invoke-NativeDvExperiment.ps1'
+    $orchestrationRoot = Join-Path $tempRoot 'orchestration'
+    $plannedRun = & $runnerPath -SourcePath $sourcePath -RuntimeManifest $manifestPath `
+        -OutputRoot $orchestrationRoot -RunId 'fake-orchestration' -EnhancementLayer yes `
+        -StartSeconds 42 -DurationSeconds 10 -HardwareDecoder no -GpuApi auto -GpuContext auto -PlanOnly
+    Assert-Equal ([IO.Path]::GetFullPath((Join-Path $orchestrationRoot 'fake-orchestration'))) $plannedRun 'plan-only runner must return its run directory'
+    $plannedManifest = Get-Content -LiteralPath (Join-Path $plannedRun 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-True $plannedManifest.PlanOnly 'plan-only state must be explicit'
+    Assert-Equal ([IO.Path]::GetFullPath($sourcePath)) $plannedManifest.Source.Path 'runner must preserve the source path'
+    Assert-Equal $runtimePath $plannedManifest.Invocation.Executable 'runner must preserve the pinned executable'
+    Assert-True (@($plannedManifest.Invocation.Arguments | Where-Object { $_ -eq '--no-config' }).Count -eq 1) 'runner manifest must record exact argv'
+    Assert-True ($plannedManifest.Invocation.Environment.TEMP -like "$plannedRun*") 'runner manifest must record isolated environment'
+    Assert-True (Test-Path -LiteralPath (Join-Path $plannedRun 'filesystem-before.json')) 'runner must snapshot storage before work'
+    Assert-True (Test-Path -LiteralPath (Join-Path $plannedRun 'source-identity-before.json')) 'runner must snapshot source identity before work'
+
+    Add-Type -AssemblyName System.Drawing
+    $offPng = Join-Path $tempRoot 'off.png'
+    $onPng = Join-Path $tempRoot 'on.png'
+    $bitmap = [Drawing.Bitmap]::new(2, 2)
+    try {
+        for ($y = 0; $y -lt 2; $y++) { for ($x = 0; $x -lt 2; $x++) { $bitmap.SetPixel($x, $y, [Drawing.Color]::FromArgb(255, 10, 20, 30)) } }
+        $bitmap.Save($offPng, [Drawing.Imaging.ImageFormat]::Png)
+        $bitmap.SetPixel(1, 0, [Drawing.Color]::FromArgb(255, 20, 20, 30))
+        $bitmap.Save($onPng, [Drawing.Imaging.ImageFormat]::Png)
+    } finally { $bitmap.Dispose() }
+    $comparisonPath = Join-Path $tempRoot 'comparison.json'
+    $comparison = & (Join-Path $root 'scripts\Compare-NativeDvCaptures.ps1') -EnhancementOn $onPng -EnhancementOff $offPng -OutputPath $comparisonPath
+    Assert-Equal 4 $comparison.PixelCount 'pixel comparison must report image size'
+    Assert-Equal 1 $comparison.ChangedPixelCount 'pixel comparison must count changed pixels'
+    Assert-Equal 10 $comparison.MaximumChannelDelta 'pixel comparison must report maximum channel delta'
+    Assert-Equal 1 $comparison.BoundingBox.Left 'pixel comparison must report changed-pixel bounds'
+    Assert-Equal 0 $comparison.BoundingBox.Top 'pixel comparison must report changed-pixel bounds'
+    Assert-True (Test-Path -LiteralPath $comparisonPath) 'pixel comparison must persist machine-readable evidence'
+    }
 
     $monitored = Join-Path $tempRoot 'monitored'
     [void][IO.Directory]::CreateDirectory($monitored)

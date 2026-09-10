@@ -26,7 +26,10 @@ function New-NativeDvInvocation {
         [Parameter(Mandatory = $true)][bool]$EnhancementLayer,
         [Parameter(Mandatory = $true)][double]$StartSeconds,
         [Parameter(Mandatory = $true)][double]$DurationSeconds,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9._-]+$')][string]$PipeName
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9._-]+$')][string]$PipeName,
+        [ValidateSet('auto-safe', 'nvdec', 'd3d11va', 'no')][string]$HardwareDecoder = 'auto-safe',
+        [ValidateSet('auto', 'd3d11', 'vulkan')][string]$GpuApi = 'auto',
+        [ValidateSet('auto', 'd3d11', 'winvk')][string]$GpuContext = 'auto'
     )
 
     $manifestData = Get-NativeDvManifestData -RuntimeManifest $RuntimeManifest
@@ -66,10 +69,26 @@ function New-NativeDvInvocation {
         "--input-ipc-server=$pipePath",
         "--log-file=$log",
         '--vo=gpu-next',
+        "--hwdec=$HardwareDecoder",
+        "--gpu-api=$GpuApi",
+        "--gpu-context=$GpuContext",
+        '--audio=no',
+        '--sub=no',
+        '--osd-level=0',
+        '--input-default-bindings=no',
+        '--input-vo-keyboard=no',
+        '--terminal=no',
+        '--geometry=1280x720',
+        '--target-prim=bt.709',
+        '--target-trc=bt.1886',
+        '--tone-mapping=bt.2446a',
+        '--screenshot-format=png',
+        '--screenshot-high-bit-depth=yes',
+        '--screenshot-tag-colorspace=yes',
+        '--msg-level=all=warn,mkv=v,vd=v,vf=v,vo/gpu-next=trace',
         '--force-window=yes',
         '--pause=yes',
         "--start=$($StartSeconds.ToString('0.###', $culture))",
-        "--length=$($DurationSeconds.ToString('0.###', $culture))",
         "--vf=format=enhancement-layer=$layer",
         '--',
         $source
@@ -93,6 +112,79 @@ function New-NativeDvInvocation {
         PipeName = $PipeName
         PipePath = $pipePath
         EnhancementLayer = $EnhancementLayer
+        DurationSeconds = $DurationSeconds
+        HardwareDecoder = $HardwareDecoder
+        GpuApi = $GpuApi
+        GpuContext = $GpuContext
+    }
+}
+
+function Get-NativeDvRuntimeEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LogText,
+        [Parameter(Mandatory = $true)][bool]$RequestedEnhancementLayer,
+        [Parameter(Mandatory = $true)][string]$RequestedHardwareDecoder
+    )
+
+    $decoderOpenCount = [regex]::Matches($LogText, '(?im)\[vd\].*Opening decoder hevc\s*$').Count
+    $selectedDecoders = @([regex]::Matches($LogText, '(?im)\[vd\].*Selected decoder:\s*([^\r\n]+)') | ForEach-Object { $_.Groups[1].Value.Trim() })
+    $apiMatch = [regex]::Match($LogText, '(?im)Initialized libplacebo .*\(API v(?<api>\d+)\)')
+    $softwareFallback = $LogText -match '(?im)\[vd\].*Using software decoding\.'
+    $hardwareObserved = $LogText -match '(?im)Using hardware decoding'
+    $nlqShader = $LogText -match '(?im)sh_dovi_compose_nlq'
+    $enhancementGpu = $LogText -match '(?im)Spent .* on shader:.*enhancement layer'
+    [pscustomobject]@{
+        RequestedEnhancementLayer = $RequestedEnhancementLayer
+        RequestedHardwareDecoder = $RequestedHardwareDecoder
+        Profile7Splitter = [bool]($LogText -match 'Dolby Vision Profile 7 splitter: BL stream \d+, virtual EL stream \d+ \(dependent_track\)')
+        HevcDecoderOpenCount = $decoderOpenCount
+        SelectedDecoders = [string[]]$selectedDecoders
+        ElPair = [bool]($LogText -match '(?im)\[vf\].*\[el_pair\]')
+        LibplaceboApi = if ($apiMatch.Success) { [int]$apiMatch.Groups['api'].Value } else { $null }
+        NlqCompositionShader = [bool]$nlqShader
+        EnhancementLayerGpuStage = [bool]$enhancementGpu
+        CompositionActive = [bool]($RequestedEnhancementLayer -and $nlqShader -and $enhancementGpu)
+        HardwareDecodingObserved = [bool]$hardwareObserved
+        SoftwareFallbackObserved = [bool]$softwareFallback
+        DeviceCreationFailureObserved = [bool]($LogText -match '(?im)(Could not create device|Loading failed)')
+    }
+}
+
+function Get-NativeDvMelFelClassification {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$DoviToolSummary = '',
+        [Parameter(Mandatory = $true)][object]$RuntimeEvidence
+    )
+
+    $evidence = [Collections.Generic.List[object]]::new()
+    $toolState = 'Unknown'
+    if ($DoviToolSummary -match '(?im)Profile:\s*7\s*\(FEL\)') {
+        $toolState = 'FEL'
+        $evidence.Add([pscustomobject]@{ Source = 'dovi_tool'; Fact = 'Profile 7 (FEL)' })
+    } elseif ($DoviToolSummary -match '(?im)Profile:\s*7\s*\(MEL\)') {
+        $toolState = 'MEL'
+        $evidence.Add([pscustomobject]@{ Source = 'dovi_tool'; Fact = 'Profile 7 (MEL)' })
+    }
+    $runtimeFel = [bool]($RuntimeEvidence.NlqCompositionShader -and $RuntimeEvidence.EnhancementLayerGpuStage)
+    if ($runtimeFel) {
+        $evidence.Add([pscustomobject]@{ Source = 'mpv/libplacebo'; Fact = 'NLQ composition shader and enhancement-layer GPU stage observed' })
+    }
+
+    $state = if ($toolState -eq 'MEL' -and $runtimeFel) {
+        'Unknown'
+    } elseif ($toolState -ne 'Unknown') {
+        $toolState
+    } elseif ($runtimeFel) {
+        'FEL'
+    } else {
+        'Unknown'
+    }
+    [pscustomobject]@{
+        MelFel = $state
+        Contradiction = [bool]($toolState -eq 'MEL' -and $runtimeFel)
+        Evidence = [object[]]$evidence.ToArray()
     }
 }
 
@@ -208,15 +300,18 @@ function Compare-NativeDvFileSnapshot {
     $bounded = @($changes | Where-Object Classification -eq 'BoundedState')
     $media = @($changes | Where-Object Classification -eq 'MediaPayload')
     $unknown = @($changes | Where-Object Classification -eq 'Unknown')
+    $boundedBytes = if ($bounded.Count) { [long](($bounded | Measure-Object -Property AfterLength -Sum).Sum) } else { 0L }
+    $mediaBytes = if ($media.Count) { [long](($media | Measure-Object -Property AfterLength -Sum).Sum) } else { 0L }
+    $unknownBytes = if ($unknown.Count) { [long](($unknown | Measure-Object -Property AfterLength -Sum).Sum) } else { 0L }
     [pscustomobject]@{
         Success = ($media.Count -eq 0 -and $unknown.Count -eq 0)
         Changes = [object[]]$changes.ToArray()
         BoundedState = $bounded
         MediaPayload = $media
         Unknown = $unknown
-        BoundedStateBytes = [long](($bounded | Measure-Object -Property AfterLength -Sum).Sum)
-        MediaPayloadBytes = [long](($media | Measure-Object -Property AfterLength -Sum).Sum)
-        UnknownBytes = [long](($unknown | Measure-Object -Property AfterLength -Sum).Sum)
+        BoundedStateBytes = $boundedBytes
+        MediaPayloadBytes = $mediaBytes
+        UnknownBytes = $unknownBytes
     }
 }
 
@@ -291,6 +386,8 @@ function Test-NativeDvSourceIdentity {
 
 Export-ModuleMember -Function @(
     'New-NativeDvInvocation',
+    'Get-NativeDvRuntimeEvidence',
+    'Get-NativeDvMelFelClassification',
     'Get-NativeDvFileSnapshot',
     'Compare-NativeDvFileSnapshot',
     'Test-NativeDvMediaArtifact',
