@@ -4,7 +4,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$files = @(& git -C $root ls-files '*.ps1')
+$files = @(& git -C $root ls-files '*.ps1' '*.psm1')
 if ($LASTEXITCODE -ne 0) { throw 'Unable to enumerate tracked PowerShell files.' }
 
 $failures = [Collections.Generic.List[string]]::new()
