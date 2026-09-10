@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "selectedAtUtc": "2026-09-10T14:15:26Z",
+  "provider": {
+    "name": "zhongfly/mpv-winbuild",
+    "releaseTag": "2026-09-09-7e4cb538a3",
+    "releaseUrl": "https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-09-09-7e4cb538a3",
+    "buildUrl": "https://github.com/zhongfly/mpv-winbuild/actions/runs/34348566908",
+    "publishedAtUtc": "2026-09-09T12:37:48Z"
+  },
+  "archive": {
+    "name": "mpv-x86_64-20260909-git-7e4cb538a3.7z",
+    "url": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-09-09-7e4cb538a3/mpv-x86_64-20260909-git-7e4cb538a3.7z",
+    "bytes": 32686070,
+    "sha256": "b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5",
+    "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5/mpv-x86_64-20260909-git-7e4cb538a3.7z"
+  },
+  "runtime": {
+    "executable": {
+      "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5/extracted/mpv.exe",
+      "bytes": 119597568,
+      "sha256": "b3c7e71e43ba37ba5dfd455ff61715c9dfe3b8ee73564a901257c038f78c9eb5"
+    },
+    "consoleLauncher": {
+      "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5/extracted/mpv.com",
+      "bytes": 3584,
+      "sha256": "7b0d096c8806122433b17758722bb323d09b62be98346907f6137e91fe414b08"
+    }
+  },
+  "mpv": {
+    "version": "0.41.0-1042-g7e4cb538a",
+    "commit": "7e4cb538a3f30d25920ad8e87ba6571540fb729f",
+    "builtAtUtc": "2026-09-09T12:25:50Z",
+    "felMergeCommit": "99b4c12cccb4d8d3f72b41944cb6c640e2156650",
+    "commitsAfterFelMerge": 196
+  },
+  "ffmpeg": {
+    "version": "N-126482-g903325e27",
+    "commit": "903325e279b67156c3aa1f06ec5cb2378d9d004d",
+    "libavcodec": "63.11.101",
+    "libavformat": "63.6.100",
+    "doviSplitSourcePresent": true,
+    "matroskaLayeredVideoSourcePresent": true
+  },
+  "libplacebo": {
+    "version": "7.371.0",
+    "commit": "3330a515d62139259c26239014f286e233bd3a5c",
+    "apiVersion": 371,
+    "requiredApiVersion": 370
+  },
+  "featureProbes": {
+    "gpuNextCompiled": true,
+    "vulkanCompiled": true,
+    "d3d11Compiled": true,
+    "cudaInteropCompiled": true,
+    "nvdecHevcListed": true,
+    "d3d11vaHevcListed": true,
+    "formatEnhancementLayerOption": true,
+    "profile7SplitterObserved": true,
+    "virtualDependentElStreamObserved": true,
+    "twoHevcDecodersObserved": true,
+    "elPairFilterObserved": true,
+    "libplaceboCompositionObserved": false,
+    "notes": "The source-backed one-frame vo=null probe establishes packaged splitter/decode/pair capability only. Renderer composition and FEL certification require the later gpu-next A/B experiment."
+  },
+  "isolationContract": {
+    "absoluteRuntimeOnly": true,
+    "noConfig": true,
+    "cacheOnDisk": false,
+    "gpuShaderCache": false,
+    "explicitConfigDirectory": true,
+    "explicitDemuxerCacheDirectory": true,
+    "explicitGpuShaderCacheDirectory": true,
+    "explicitWatchLaterDirectory": true,
+    "savePositionOnQuit": false,
+    "isolatedTempEnvironment": true
+  },
+  "stableRuntimeBeforeProbe": {
+    "path": "C:/mpv/mpv.exe",
+    "version": "0.41.0-1011-g182fa6ca4",
+    "bytes": 123145216,
+    "sha256": "20f742a74f07b641a272ce5c521937c74aae3791b394fb069fe548f67d32b715",
+    "lastWriteTimeUtc": "2026-08-28T00:52:38.1690232Z"
+  }
+}
