@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $fixture=Join-Path $root ('.artifacts/reconstruction-safety-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture | Out-Null
-Copy-Item -LiteralPath (Join-Path $root 'Reconstruct-0.3.2.ps1') -Destination $fixture
+Copy-Item -LiteralPath (Join-Path $root 'legacy/0.3.x/Reconstruct-0.3.2.ps1') -Destination $fixture
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 try {

@@ -2,7 +2,7 @@
 
 ## Authority and scope
 
-`source/src/AdaptiveMedia.App/DvConversionPlan.cs` owns the typed facts, losses,
+`src/AdaptiveMedia.App/DvConversionPlan.cs` owns the typed facts, losses,
 output expectations and stable reason codes. `DvConversionPlanner.Build` is the
 pure policy entry point. `tests/DolbyVisionTests` is a dependency-free deterministic
 console suite matching existing repository test conventions.
@@ -126,7 +126,7 @@ the converted stream after a zero-exit helper result; the validator rejects it.
 The checked-in 259-frame MEL and FEL Matroska fixtures are reproducible structural
 samples with HDR10 base video, audio, forced subtitle, chapters, attachment and
 tags. Their exact upstream blobs, tool releases, SHA-256 values and licenses are in
-[`tests/DolbyVisionExecutionTests/fixtures/PROVENANCE.md`](tests/DolbyVisionExecutionTests/fixtures/PROVENANCE.md).
+[`tests/DolbyVisionExecutionTests/fixtures/PROVENANCE.md`](../tests/DolbyVisionExecutionTests/fixtures/PROVENANCE.md).
 They are not claimed to be authored commercial Dolby Vision masters or subjective
 quality references.
 
@@ -140,7 +140,7 @@ extractor. Missing real tools are a failure, never a skipped success.
 Run the semantic and real-media gates with:
 
 ```powershell
-dotnet run --project source/tests/AdaptiveMedia.Tests.csproj
+dotnet run --project tests/AdaptiveMedia.Tests/AdaptiveMedia.Tests.csproj
 dotnet run --project tests/DolbyVisionTests/DolbyVisionTests.csproj
 pwsh -NoProfile -ExecutionPolicy Bypass -File tests/Run-DolbyVisionExecutionTests.ps1
 ```
@@ -156,5 +156,6 @@ Shadow Transcode, installer changes, playback integration, and broad WPF UI rema
 out of scope and non-executable.
 
 Production integration is verified with
-`dotnet build source/src/AdaptiveMedia.App/AdaptiveMedia.App.csproj --no-restore`.
+`dotnet restore src/AdaptiveMedia.App/AdaptiveMedia.App.csproj` followed by
+`dotnet build src/AdaptiveMedia.App/AdaptiveMedia.App.csproj --no-restore`.
 No playback production files are modified by this milestone.

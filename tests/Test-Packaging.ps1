@@ -11,17 +11,19 @@ function Load-Function($path, $name) {
     return (Get-Item ('Function:' + $name)).ScriptBlock
 }
 function Assert-Throws($action, $message) { try { & $action } catch { if ($_.Exception.Message -like "*$message*") { return }; throw }; throw "Expected rejection: $message" }
-$verify = Load-Function (Join-Path $root 'source/payload/Provision-Dependencies.ps1') 'Assert-DownloadDigest'
+$verify = Load-Function (Join-Path $root 'payload/Provision-Dependencies.ps1') 'Assert-DownloadDigest'
 Set-Item Function:Assert-DownloadDigest $verify
 Assert-Throws { Assert-DownloadDigest ([pscustomobject]@{}) 'missing.exe' } 'SHA-256 digest is required'
 Assert-Throws { Assert-DownloadDigest ([pscustomobject]@{digest='sha256:bad'}) 'missing.exe' } 'SHA-256 digest is required'
-$sample = Join-Path $root '.artifacts/digest-test.txt'
+$artifacts = Join-Path $root '.artifacts'
+New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+$sample = Join-Path $artifacts 'digest-test.txt'
 [IO.File]::WriteAllText($sample, 'download')
 try {
     Assert-Throws { Assert-DownloadDigest ([pscustomobject]@{digest=('sha256:' + ('0' * 64))}) $sample } 'did not match'
     Assert-DownloadDigest ([pscustomobject]@{digest=('sha256:' + (Get-FileHash -LiteralPath $sample).Hash)}) $sample
 } finally { Remove-Item -LiteralPath $sample }
-$guard = Load-Function (Join-Path $root 'source/scripts/Build-Dev.ps1') 'Assert-SafeChild'
+$guard = Load-Function (Join-Path $root 'scripts/Build-Dev.ps1') 'Assert-SafeChild'
 Set-Item Function:Assert-SafeChild $guard
 Assert-Throws { Assert-SafeChild $root $root } 'outside'
 Assert-Throws { Assert-SafeChild (Join-Path $root '../elsewhere') $root } 'outside'

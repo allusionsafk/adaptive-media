@@ -3,7 +3,8 @@ param(
     [string]$Ffmpeg = 'ffmpeg',
     [string]$DoviTool,
     [string]$MkvToolNixDirectory,
-    [string]$UpstreamSource
+    [string]$UpstreamSource,
+    [switch]$ToolsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +63,19 @@ if ([string]::IsNullOrWhiteSpace($MkvToolNixDirectory)) {
         New-Item -ItemType Directory -Force -Path $MkvToolNixDirectory | Out-Null
         Invoke-Checked 'tar' @('-xf', $mkvArchive, '-C', $MkvToolNixDirectory, '--strip-components', '1')
     }
+}
+
+if ($ToolsOnly) {
+    $mkvmerge = Join-Path $MkvToolNixDirectory 'mkvmerge.exe'
+    $mkvextract = Join-Path $MkvToolNixDirectory 'mkvextract.exe'
+    $mkvpropedit = Join-Path $MkvToolNixDirectory 'mkvpropedit.exe'
+    foreach ($tool in @($DoviTool, $mkvmerge, $mkvextract, $mkvpropedit)) {
+        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Required pinned tool not found: $tool" }
+    }
+    if ((& $DoviTool --version) -notmatch '^dovi_tool 2\.3\.3$') { throw 'dovi_tool 2.3.3 is required.' }
+    if ((& $mkvmerge --version | Select-Object -First 1) -notmatch '^mkvmerge v101\.0 ') { throw 'MKVToolNix 101.0 is required.' }
+    Write-Host 'Pinned Dolby Vision execution tools prepared without rebuilding fixtures.'
+    return
 }
 
 if ([string]::IsNullOrWhiteSpace($UpstreamSource)) {

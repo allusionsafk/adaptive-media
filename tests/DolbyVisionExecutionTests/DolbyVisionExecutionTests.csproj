@@ -6,9 +6,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../source/src/AdaptiveMedia.App/Dv*.cs" />
-    <Compile Include="../../source/src/AdaptiveMedia.App/PlaybackPlan.cs" />
-    <Compile Include="../../source/src/AdaptiveMedia.App/Models.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/Dv*.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="fixtures/*.mkv" CopyToOutputDirectory="PreserveNewest" />

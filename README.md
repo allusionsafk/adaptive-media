@@ -1,42 +1,77 @@
-# Adaptive Media 0.3.0
+# Adaptive Media
 
-This directory contains the reviewed stable source transport and the automated Windows release gate for Adaptive Media 0.3.0.
+Adaptive Media is a Windows 11 reference-first launcher around
+**mpv / gpu-next / libplacebo**, with optional per-video enhancements and an
+MPC-BE fallback.
 
-The source archive is stored as Base64 text because this repository's earlier Adaptive Media development transport used text-safe artifacts. The accompanying SHA-256 is verified before extraction. GitHub Actions reconstructs the source on a Windows runner, builds the self-contained WPF app, performs the built-in integration and isolated installer smoke tests, and publishes `AdaptiveMediaSetup-0.3.0-x64.exe` to the `v0.3.0` GitHub release.
+This is the standalone Adaptive Media repository. The application, tests,
+installer, payload, documentation, CI, and future release-candidate tooling no
+longer depend on the `localai-windows-starter` repository layout.
 
-The actual release source contains the native .NET 10 WPF application, PowerShell playback engine, Inno Setup installer, managed mpv configuration, dependency provisioner, and build script.
+## Repository layout
 
-## Dolby Vision P7 to P8.1 execution
+- `src/AdaptiveMedia.App/` — native .NET 10 WPF application
+- `tests/` — planner, settings, packaging, reconstruction, and Dolby Vision
+  execution gates
+- `installer/` — Inno Setup definition
+- `payload/` — playback engine, dependency provisioner, icon, and mpv config
+- `scripts/` — build and guarded release tooling
+- `docs/` — product, contract, migration provenance, and historical records
+- `legacy/0.3.x/` — inactive historical source transport and reconstruction
+  material
 
-The source tree now contains an execution-grade Matroska Dolby Vision evidence
-adapter and one deliberately narrow transactional executor for planner-approved
-Profile 7 MEL/FEL to Profile 8.1 conversion. It stream-copies and independently
-hash-validates the compressed HDR10 base, rewrites RPU with dovi_tool, discards the
-enhancement layer, preserves supported tracks/container data, and promotes only an
-independently validated temporary output. FEL conversion requires explicit
-acknowledgement and always reports lost FEL picture contribution.
+## Verified gates
 
-The executor performs a destination-volume scratch preflight before helper launch.
-Its conservative artifact allowance is approximately three source sizes plus
-Matroska overhead, with a separately reported safety reserve. Validation artifacts
-are consumed and deleted sequentially; this reduces measured checked-in-fixture
-peaks from 3.362x to 2.011x for MEL and 1.714x for FEL without removing any
-profile/RPU/EL, normalized-base, source-integrity, stream, chapter, attachment, or
-metadata proof.
-
-Run its non-skipping, provenance-backed real-media regression on Windows with
-FFprobe 7.1 on PATH:
+From the repository root:
 
 ```powershell
+dotnet run --project tests/AdaptiveMedia.Tests/AdaptiveMedia.Tests.csproj -c Release
+dotnet run --project tests/SettingsTests/SettingsTests.csproj -c Release
+dotnet run --project tests/DolbyVisionTests/DolbyVisionTests.csproj -c Release
+pwsh -NoProfile -ExecutionPolicy Bypass -File tests/Test-Packaging.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File tests/Test-Reconstruction.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File tests/Run-DolbyVisionExecutionTests.ps1
+dotnet restore src/AdaptiveMedia.App/AdaptiveMedia.App.csproj
+dotnet build src/AdaptiveMedia.App/AdaptiveMedia.App.csproj -c Release --no-restore
 ```
 
-The runner verifies or prepares pinned dovi_tool 2.3.3 and MKVToolNix 101.0 under
-`.artifacts/dv-tests`. Fixture provenance and the exact preservation/validation
-contract are documented in [DOLBY-VISION-CONTRACT.md](DOLBY-VISION-CONTRACT.md).
-P5, GPU conversion, Shadow Transcode, installer changes, playback wiring and broad
-WPF UI are not part of this executor.
+The Dolby Vision execution runner requires FFmpeg/FFprobe 7.1 and prepares
+pinned dovi_tool 2.3.3 and MKVToolNix 101.0 under ignored `.artifacts/` storage.
+The checked-in MEL/FEL fixtures and their upstream license/provenance are under
+`tests/DolbyVisionExecutionTests/fixtures/`.
 
-## Release publication
+Build the application and installer with:
 
-`Publish-Release.ps1` performs the GitHub release step and is invoked by the workflow. It probes for an existing `v0.3.0` release, creates it when absent, replaces the assets and refreshes the metadata when present, and then re-downloads the published installer asset to confirm its SHA-256 matches the artifact that passed the build gate. Genuine `gh` failures are re-raised with `gh`'s own output; only the specific "release does not exist" signal is treated as a non-error.
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Dev.ps1 -Clean
+```
+
+Add `-SmokeTest` for the isolated install, self-test, integration-test, upgrade,
+uninstall, and settings-preservation gate.
+
+## Release policy
+
+- Reference playback does not silently enable interpolation, fake HDR,
+  aggressive sharpening, or cleanup.
+- High-quality scaling, smooth motion, debanding, RTX Video Super Resolution,
+  and RTX Video HDR remain explicit opt-ins.
+- Decoded PCM is the safe audio default; HDMI bitstream remains optional.
+- Dolby Vision metadata can be processed by mpv/libplacebo, but Adaptive Media
+  does not claim native Windows Profile 7 FEL passthrough.
+
+Future candidate builds are manual-only. Release operators must pass the certified
+installer digest and expected commit to `scripts/Publish-Release.ps1`; when supplied,
+the script verifies them and independently verifies published assets. Migration does
+not publish or recreate any release.
+
+## Provenance and licensing
+
+Adaptive Media historically originated in
+[`allusionsafk/localai-windows-starter`](https://github.com/allusionsafk/localai-windows-starter).
+The original `v0.4.0-rc1` prerelease remains there. Extraction details, source
+commit/tree identifiers, rewritten-history disclosure, and the migration path
+map are recorded in [docs/MIGRATION-PROVENANCE.md](docs/MIGRATION-PROVENANCE.md).
+
+No project-level license existed at the migration checkpoint, and this
+repository does not invent one. Third-party fixture notices are preserved with
+the fixtures.

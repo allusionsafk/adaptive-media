@@ -1,0 +1,8 @@
+.artifacts/
+build/
+dist/
+**/bin/
+**/obj/
+*.generated.iss
+.superpowers/
+.tmp/

@@ -21,19 +21,31 @@ function Test-Hash([string]$Path, [string]$Expected) {
 }
 
 $fixturesValid = (Test-Hash $melFixture $expectedMel) -and (Test-Hash $felFixture $expectedFel)
+if (-not $fixturesValid) {
+    throw 'Pinned Dolby Vision fixture hashes do not match. Tests never rebuild committed evidence implicitly; run the fixture builder explicitly only when intentionally updating fixtures.'
+}
+$fixtureWriteTimes = @{
+    $melFixture = (Get-Item -LiteralPath $melFixture).LastWriteTimeUtc
+    $felFixture = (Get-Item -LiteralPath $felFixture).LastWriteTimeUtc
+}
 $toolsPresent = @($doviTool, $mkvMerge, $mkvExtract, $mkvPropEdit) |
     ForEach-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
     Where-Object { -not $_ } |
     Measure-Object |
     Select-Object -ExpandProperty Count
 
-if (-not $fixturesValid -or $toolsPresent -ne 0) {
-    & (Join-Path $fixtureDirectory 'Build-DvFixtures.ps1')
+if ($toolsPresent -ne 0) {
+    & (Join-Path $fixtureDirectory 'Build-DvFixtures.ps1') -ToolsOnly
     if ($LASTEXITCODE -ne 0) { throw "Dolby Vision fixture/tool preparation failed with exit code $LASTEXITCODE." }
 }
 
 if (-not (Test-Hash $melFixture $expectedMel) -or -not (Test-Hash $felFixture $expectedFel)) {
     throw 'Pinned Dolby Vision fixture hashes do not match after preparation.'
+}
+foreach ($fixture in @($melFixture, $felFixture)) {
+    if ((Get-Item -LiteralPath $fixture).LastWriteTimeUtc -ne $fixtureWriteTimes[$fixture]) {
+        throw "Tool preparation modified committed fixture evidence: $fixture"
+    }
 }
 foreach ($tool in @($doviTool, $mkvMerge, $mkvExtract, $mkvPropEdit)) {
     if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Required pinned tool is missing: $tool" }
