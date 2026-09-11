@@ -95,6 +95,9 @@ Copy-Item (Join-Path $Root 'payload\AdaptiveMedia.Engine.ps1') $Stage
 Copy-Item (Join-Path $Root 'payload\Provision-Dependencies.ps1') $Stage
 Copy-Item (Join-Path $Root 'payload\AdaptiveMedia.ico') $Stage
 Copy-Item (Join-Path $Root 'payload\mpv-config') $Stage -Recurse
+# The application reads the very same pinned manifest the experiment used, so the
+# shipped runtime description cannot drift from the one the proof was made against.
+Copy-Item (Join-Path $Root 'docs\native-dv-p7\runtime-manifest.json') (Join-Path $Stage 'native-dv-runtime.json')
 if (Test-Path (Join-Path $Root 'payload\certification')) { Copy-Item (Join-Path $Root 'payload\certification') $Stage -Recurse -Force }
 
 Step 'Launcher self-test'

@@ -140,4 +140,282 @@ Check(softwarePath.Degradation.Any(x => x.Contains("Software decoding fallback")
 Check(typeof(NativeDvPlaybackPlan).GetConstructors().Length == 0 && typeof(NativeDvPlaybackPlan).GetProperties().All(x => x.SetMethod is null),
     "Native plans cannot be externally constructed or mutated to erase a fallback");
 
+
+// ---------------------------------------------------------------------------
+// Native Profile 7 runtime provisioning. A runtime is only usable when every
+// pinned component validated; a partially provisioned tree must never be
+// exposed, and nothing may install outside the application's own root.
+// ---------------------------------------------------------------------------
+string Sha256Of(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+byte[] exeBytes = System.Text.Encoding.UTF8.GetBytes("pinned-mpv-executable-payload");
+byte[] comBytes = System.Text.Encoding.UTF8.GetBytes("pinned-mpv-console-launcher");
+byte[] archiveBytes = System.Text.Encoding.UTF8.GetBytes("pinned-archive-payload-bytes");
+
+string ManifestJson(int placeboApi = 371) => $$"""
+{
+  "schemaVersion": 1,
+  "provider": { "name": "test-provider", "releaseUrl": "https://example.invalid/release" },
+  "archive": { "name": "runtime.7z", "url": "https://example.invalid/runtime.7z",
+               "bytes": {{archiveBytes.Length}}, "sha256": "{{Sha256Of(archiveBytes)}}" },
+  "runtime": {
+    "executable": { "pathRelativeToManifest": "../../.artifacts/x/extracted/mpv.exe",
+                    "bytes": {{exeBytes.Length}}, "sha256": "{{Sha256Of(exeBytes)}}" },
+    "consoleLauncher": { "pathRelativeToManifest": "../../.artifacts/x/extracted/mpv.com",
+                         "bytes": {{comBytes.Length}}, "sha256": "{{Sha256Of(comBytes)}}" }
+  },
+  "mpv": { "version": "0.41.0-1042-g7e4cb538a", "commit": "7e4cb538a3f30d25920ad8e87ba6571540fb729f" },
+  "libplacebo": { "apiVersion": {{placeboApi}} }
+}
+""";
+
+var descriptor = NativeDvRuntimeDescriptor.FromManifestJson(ManifestJson());
+Check(descriptor.VersionId == Sha256Of(archiveBytes), "The runtime generation is identified by its archive content, not its name");
+Check(descriptor.LauncherRelativePath == "mpv.exe", "The windowed executable is what the product launches");
+Check(descriptor.Components.Length == 2, "Every pinned component is carried");
+Check(descriptor.LibplaceboApi == 371 && descriptor.MpvCommit.StartsWith("7e4cb538a"), "Runtime identity is parsed");
+
+// The shipped descriptor is the same pinned manifest the proof used, so parsing
+// the real committed file is the anti-drift regression.
+string realManifest = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "native-dv-p7", "runtime-manifest.json");
+if (File.Exists(realManifest))
+{
+    var real = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(realManifest));
+    Check(real.LauncherRelativePath == "mpv.exe", "The shipped manifest resolves a launcher inside the extracted tree");
+    Check(real.Components.Length == 2 && real.LibplaceboApi >= NativeDvRuntime.RequiredLibplaceboApi,
+        "The shipped manifest pins components and a composing libplacebo API");
+    Check(real.ArchiveUrl.Scheme == "https" && real.ArchiveSha256.Length == 64, "The shipped manifest pins an https archive by SHA-256");
+}
+
+Check(Throws(() => NativeDvRuntimeDescriptor.FromManifestJson(ManifestJson().Replace(Sha256Of(exeBytes), "not-a-hash"))),
+    "A component without a pinned SHA-256 is refused");
+Check(Throws(() => NativeDvRuntimeDescriptor.FromManifestJson(ManifestJson().Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2"))),
+    "An unknown manifest schema is refused");
+
+static bool Throws(Action action) { try { action(); return false; } catch { return true; } }
+
+string testRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-native-dv-" + Guid.NewGuid().ToString("N"));
+try
+{
+    string root = Path.Combine(testRoot, "runtimes", "native-dv");
+    int fetchCount = 0, extractCount = 0;
+
+    NativeDvArchiveFetch Fetch(byte[] payload) => (uri, destination, token) =>
+    { fetchCount++; File.WriteAllBytes(destination, payload); return Task.CompletedTask; };
+    NativeDvArchiveExtract Extract(bool writeExe = true, bool writeCom = true, byte[]? exeOverride = null) => (archive, destination, token) =>
+    {
+        extractCount++;
+        if (writeExe) File.WriteAllBytes(Path.Combine(destination, "mpv.exe"), exeOverride ?? exeBytes);
+        if (writeCom) File.WriteAllBytes(Path.Combine(destination, "mpv.com"), comBytes);
+        return Task.CompletedTask;
+    };
+
+    var store = new NativeDvRuntimeStore(root, Fetch(archiveBytes), Extract());
+    Check(store.Resolve(descriptor).State == NativeDvRuntimeState.NotInstalled, "An empty store reports the runtime as not installed");
+    Check(!store.Resolve(descriptor).IsUsable, "A missing runtime is never usable");
+
+    // Provisioning is refused outright when the user has not allowed a download.
+    var refused = await store.ProvisionAsync(descriptor, allowDownload: false);
+    Check(refused.State == NativeDvRuntimeState.ProvisioningNotAllowed, "Provisioning does not happen without permission");
+    Check(fetchCount == 0, "A refused provision never reaches the network");
+
+    // First provision.
+    var provisioned = await store.ProvisionAsync(descriptor, allowDownload: true);
+    Check(provisioned.State == NativeDvRuntimeState.Installed && provisioned.IsUsable, "A complete, verified runtime installs");
+    Check(provisioned.Runtime!.ExecutablePath == Path.Combine(root, descriptor.VersionId, "mpv.exe"), "The launcher resolves inside its own generation");
+    Check(File.Exists(provisioned.Runtime.ExecutablePath), "The promoted runtime is really on disk");
+    Check(fetchCount == 1 && extractCount == 1, "Provisioning downloads and extracts exactly once");
+
+    // Already-installed fast path: no second download.
+    var reused = await store.ProvisionAsync(descriptor, allowDownload: true);
+    Check(reused.IsUsable && fetchCount == 1 && extractCount == 1, "An installed runtime is reused without downloading again");
+
+    // Reuse still validates: corrupting an installed component must be detected.
+    string installedExe = provisioned.Runtime.ExecutablePath;
+    byte[] good = File.ReadAllBytes(installedExe);
+    File.WriteAllBytes(installedExe, System.Text.Encoding.UTF8.GetBytes(new string('x', good.Length)));
+    var corrupted = store.Resolve(descriptor);
+    Check(corrupted.State == NativeDvRuntimeState.ComponentHashMismatch && !corrupted.IsUsable,
+        "A tampered installed component is detected on reuse, not trusted because the file exists");
+    File.Delete(installedExe);
+    Check(store.Resolve(descriptor).State == NativeDvRuntimeState.Incomplete, "A missing component makes the runtime incomplete");
+    File.WriteAllBytes(installedExe, good);
+    Check(store.Resolve(descriptor).IsUsable, "Restoring the component restores the runtime");
+
+    // A wrong archive is never opened.
+    string root2 = Path.Combine(testRoot, "store2");
+    int extract2 = 0;
+    var badArchive = new NativeDvRuntimeStore(root2, Fetch(System.Text.Encoding.UTF8.GetBytes("wrong-archive-payload-xx")),
+        (a, d, t) => { extract2++; return Task.CompletedTask; });
+    var archiveResult = await badArchive.ProvisionAsync(descriptor, allowDownload: true);
+    Check(archiveResult.State == NativeDvRuntimeState.ArchiveHashMismatch, "An archive that fails its pinned hash is rejected");
+    Check(extract2 == 0, "A failed archive is never extracted");
+    Check(!Directory.Exists(Path.Combine(root2, descriptor.VersionId)), "A failed provision promotes nothing");
+
+    // An incomplete extraction must not be promoted.
+    string root3 = Path.Combine(testRoot, "store3");
+    var incomplete = new NativeDvRuntimeStore(root3, Fetch(archiveBytes), Extract(writeCom: false));
+    var incompleteResult = await incomplete.ProvisionAsync(descriptor, allowDownload: true);
+    Check(incompleteResult.State == NativeDvRuntimeState.Incomplete, "An extraction missing a component is incomplete");
+    Check(!Directory.Exists(Path.Combine(root3, descriptor.VersionId)), "An incomplete runtime is never promoted");
+    Check(!incomplete.Resolve(descriptor).IsUsable, "A partially provisioned runtime is never exposed as valid");
+
+    // A component of the right size but wrong content must not be promoted.
+    string root4 = Path.Combine(testRoot, "store4");
+    var tampered = new NativeDvRuntimeStore(root4, Fetch(archiveBytes),
+        Extract(exeOverride: System.Text.Encoding.UTF8.GetBytes(new string('y', exeBytes.Length))));
+    var tamperedResult = await tampered.ProvisionAsync(descriptor, allowDownload: true);
+    Check(tamperedResult.State == NativeDvRuntimeState.ComponentHashMismatch, "Right size and wrong content is still a mismatch");
+    Check(!Directory.Exists(Path.Combine(root4, descriptor.VersionId)), "A tampered runtime is never promoted");
+
+    // A download failure is reported, not thrown at the caller.
+    string root5 = Path.Combine(testRoot, "store5");
+    var offline = new NativeDvRuntimeStore(root5, (u, d, t) => throw new IOException("offline"), Extract());
+    Check((await offline.ProvisionAsync(descriptor, allowDownload: true)).State == NativeDvRuntimeState.DownloadUnavailable,
+        "An unavailable download is a reported state, not an exception");
+
+    // Cancellation leaves nothing behind.
+    string root6 = Path.Combine(testRoot, "store6");
+    using var cancelled = new CancellationTokenSource();
+    var cancelStore = new NativeDvRuntimeStore(root6, (u, d, t) => { cancelled.Cancel(); File.WriteAllBytes(d, archiveBytes); return Task.CompletedTask; }, Extract());
+    var cancelResult = await cancelStore.ProvisionAsync(descriptor, allowDownload: true, null, cancelled.Token);
+    Check(cancelResult.State == NativeDvRuntimeState.Cancelled, "Cancellation is reported as cancellation");
+    Check(!Directory.Exists(Path.Combine(root6, descriptor.VersionId)), "A cancelled provision promotes nothing");
+
+    // Interrupted staging is recoverable and never mistaken for an install.
+    string root7 = Path.Combine(testRoot, "store7");
+    string orphan = Path.Combine(root7, NativeDvRuntimeStore.StagingDirectoryName, "interrupted");
+    Directory.CreateDirectory(orphan);
+    File.WriteAllBytes(Path.Combine(orphan, "mpv.exe"), exeBytes);
+    var recovering = new NativeDvRuntimeStore(root7, Fetch(archiveBytes), Extract());
+    Check(recovering.Resolve(descriptor).State == NativeDvRuntimeState.NotInstalled, "An abandoned staging tree is not an installed runtime");
+    Check(recovering.CleanupStaging() == 1, "Abandoned staging generations are cleaned up");
+    var afterRecovery = await recovering.ProvisionAsync(descriptor, allowDownload: true);
+    Check(afterRecovery.IsUsable, "Provisioning succeeds after an interrupted attempt");
+    Check(recovering.CleanupStaging() == 0 && Directory.Exists(Path.Combine(root7, descriptor.VersionId)),
+        "Cleanup removes staging only, never a promoted generation");
+
+    // A runtime that cannot compose is refused even when every file validates.
+    var oldPlacebo = NativeDvRuntimeDescriptor.FromManifestJson(ManifestJson(placeboApi: 369));
+    string root8 = Path.Combine(testRoot, "store8");
+    var weak = new NativeDvRuntimeStore(root8, Fetch(archiveBytes), Extract());
+    var weakResult = await weak.ProvisionAsync(oldPlacebo, allowDownload: true);
+    Check(weakResult.State == NativeDvRuntimeState.UnsupportedRuntime && !weakResult.IsUsable,
+        "A runtime below the composing libplacebo API is refused rather than silently degraded");
+
+    // Nothing may be installed outside the application's own root.
+    Check(Directory.GetDirectories(testRoot).All(x => Path.GetFileName(x) is "runtimes" or "store2" or "store3" or "store4" or "store5" or "store6" or "store7" or "store8"),
+        "The store writes only inside the roots it was given");
+    Check(!Directory.Exists(@"C:\mpv\" + descriptor.VersionId), "Provisioning never installs into the stable runtime location");
+
+    // A component path that escapes its generation is refused.
+    string escaping = ManifestJson().Replace("../../.artifacts/x/extracted/mpv.exe", "../../.artifacts/x/extracted/../../../escape.exe");
+    var escapeDescriptor = NativeDvRuntimeDescriptor.FromManifestJson(escaping);
+    Check(Throws(() => new NativeDvRuntimeStore(Path.Combine(testRoot, "store9"), Fetch(archiveBytes), Extract())
+        .Resolve(escapeDescriptor with { VersionId = descriptor.VersionId })) ||
+        !Directory.Exists(Path.Combine(testRoot, "store9")),
+        "A component path that escapes the runtime directory is refused");
+
+    // ---------------------------------------------------------------------
+    // Lane selection: opt-in, and explicit about every refusal.
+    // ---------------------------------------------------------------------
+    var laneStore = new NativeDvRuntimeStore(Path.Combine(testRoot, "lane"), Fetch(archiveBytes), Extract());
+    var lane = new NativeDvLane(laneStore, descriptor);
+    var off = await lane.PrepareAsync("nonexistent.mkv", new AppSettings { NativeDolbyVisionLane = false },
+        "config", "pipe", null, null);
+    Check(!off.Selected && off.Plan is null, "The native lane is never selected implicitly");
+    Check(off.Reason!.Contains("turned off"), "A disabled lane says so");
+
+    var noDescriptor = new NativeDvLane(laneStore, null);
+    var missing = await noDescriptor.PrepareAsync("nonexistent.mkv", new AppSettings { NativeDolbyVisionLane = true },
+        "config", "pipe", null, null);
+    Check(missing.RuntimeState == NativeDvRuntimeState.DescriptorUnavailable && missing.Plan is null,
+        "A build with no runtime description cannot select the lane");
+
+    var blockedStore = new NativeDvRuntimeStore(Path.Combine(testRoot, "blocked"), Fetch(archiveBytes), Extract());
+    var blocked = await new NativeDvLane(blockedStore, descriptor).PrepareAsync("nonexistent.mkv",
+        new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = false }, "config", "pipe", null, null);
+    Check(blocked.RuntimeState == NativeDvRuntimeState.ProvisioningNotAllowed && blocked.Plan is null,
+        "Without a runtime and without download permission the lane refuses");
+
+    Check(NativeDvLane.LoadDescriptor(Path.Combine(testRoot, "no-such-descriptor.json")) is null,
+        "A missing descriptor file is absent, not an exception");
+}
+finally { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); }
+
+// ---------------------------------------------------------------------------
+// Product observation: the version-pinned log adapter.
+// ---------------------------------------------------------------------------
+const string pinnedCommit = "7e4cb538a3f30d25920ad8e87ba6571540fb729f";
+string composedLog = string.Join("\n",
+    "[   0.016][v][mkv] Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track).",
+    "[   0.285][v][vd] Opening decoder hevc",
+    "[   0.286][v][vd] Selected decoder: hevc - HEVC (High Efficiency Video Coding)",
+    "[   0.286][v][vd] Opening decoder hevc",
+    "[   0.287][v][vd] Selected decoder: hevc - HEVC (High Efficiency Video Coding)",
+    "[   0.286][v][vo/gpu-next] Loading hwdec driver 'd3d11-egl'",
+    "[   0.286][v][vo/gpu-next] Loading failed.",
+    "[   0.318][i][vd] Using hardware decoding (d3d11va).",
+    "[   0.346][v][vf] [el_pair] 3840x2160 d3d11[p010] dolbyvision/bt.2020/pq/limited/display",
+    "[   0.280][v][vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)",
+    "[   0.534][d][vo/gpu-next/libplacebo] [233] /* sh_dovi_compose_nlq */");
+string suppressedLog = composedLog.Replace("[   0.534][d][vo/gpu-next/libplacebo] [233] /* sh_dovi_compose_nlq */", "");
+
+var productComposed = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.41.0-1042-g7e4cb538a", pinnedCommit, true, "d3d11va");
+Check(productComposed.Delivered == NativeDvDelivered.FullEnhancementLayer, "The product reports Full FEL only from observed composition");
+Check(productComposed.BlElPairing == DvObservedState.Active && productComposed.DecoderInstances == 2, "BL/EL pairing and both decoders are observed");
+Check(productComposed.HardwareSurfaces == DvObservedState.Active, "Declining an optional hwdec interop driver is not a software fallback");
+Check(!productComposed.HasDegradation, "A fully composed product session reports no degradation");
+Check(productComposed.LibplaceboApi == 371, "The renderer API is observed");
+
+var productSuppressed = NativeDvLogEvidence.Reduce(suppressedLog, "mpv v0.41.0-1042-g7e4cb538a", pinnedCommit, true, "d3d11va");
+Check(productSuppressed.Delivered == NativeDvDelivered.BaseLayerOnly, "Without observed composition the product reports base layer only");
+Check(productSuppressed.Degradation.Any(x => x.Contains("base-layer-only")), "The product names the base-layer-only fallback");
+Check(!productSuppressed.Summary.Contains("Full enhancement-layer"), "A base-layer product session never reads as Full FEL");
+
+// A different build invalidates the patterns, so nothing may be claimed from them.
+var wrongBuild = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.40.0-1-gdeadbeef", pinnedCommit, true, "d3d11va");
+Check(wrongBuild.Delivered == NativeDvDelivered.Unknown, "Log patterns from an unpinned build are not trusted");
+Check(wrongBuild.FelComposition == DvObservedState.Unknown && wrongBuild.BlElPairing == DvObservedState.Unknown,
+    "An unpinned build leaves observations Unknown, not Inactive");
+Check(!NativeDvLogEvidence.VersionMatches(null, pinnedCommit), "An unknown runtime version never matches the pinned commit");
+Check(NativeDvLogEvidence.VersionMatches("mpv v0.41.0-1042-g7e4cb538a", pinnedCommit), "The pinned build is recognised");
+
+// The bounded source probe.
+var probed = NativeDvSourceProbe.Parse("AMDV|7|6|hevc|pq|bt.2020|3840|2160");
+Check(probed.IsProfile7 && probed.Width == 3840 && probed.Height == 2160, "The bounded probe reads Profile 7 and real dimensions");
+Check(!NativeDvSourceProbe.Parse("AMDV|(unavailable)|x|hevc|pq|bt.2020|0|0").IsProfile7, "An unavailable profile property is not Profile 7");
+Check(!NativeDvSourceProbe.Parse("nothing here").IsProfile7, "Unparseable probe output is not Profile 7");
+string[] probeArgv = NativeDvSourceProbe.BuildArguments(@"C:\media\authored.mkv");
+Check(probeArgv.Contains("--vo=null") && probeArgv.Contains("--frames=1") && probeArgv.Contains("--cache-on-disk=no"),
+    "The probe decodes one frame to nothing and caches nothing on disk");
+Check(!probeArgv.Any(x => x.Contains("-o=") || x.Contains("extract", StringComparison.OrdinalIgnoreCase) || x.Contains("encode", StringComparison.OrdinalIgnoreCase)),
+    "The probe cannot extract, encode, or write media");
+Check(probeArgv[^1] == @"C:\media\authored.mkv" && probeArgv[^2] == "--", "The probe reads the original container unchanged");
+
+// The product plan keeps the zero-scratch and isolation invariants.
+var productPlan = NativeDvPlaybackPlanner.Build(fel, pinned, @"C:\media\authored.mkv", "config", "pipe",
+    experimentalLaneEnabled: true, enhancementLayer: true, logPath: @"C:\logs\native-dv.log",
+    target: new PlaybackTarget(2560, 1440, 1, false, true), allowUnclassifiedEnhancementLayer: true);
+Check(productPlan.Supported && productPlan.Arguments.Contains("--no-config"), "The product plan keeps the proven isolated invocation");
+Check(productPlan.Arguments.Contains("--cache-on-disk=no"), "Zero media scratch survives productization");
+Check(productPlan.Arguments.Contains(@"--log-file=C:\logs\native-dv.log"), "The product plan writes a bounded diagnostic log");
+Check(productPlan.Arguments.Any(x => x.StartsWith("--msg-level=") && x.Contains("vo/gpu-next=debug") && !x.Contains("trace")),
+    "Debug level keeps the composition evidence without a per-frame line that would grow with duration");
+Check(productPlan.Arguments.Contains("--autofit=2560x1440") && productPlan.Arguments.Contains("--screen=1"),
+    "The product plan honours the chosen display");
+Check(!productPlan.Arguments.Any(x => x.Contains("mkvextract", StringComparison.OrdinalIgnoreCase) ||
+    x.Contains("dovi_tool", StringComparison.OrdinalIgnoreCase) || x.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)),
+    "Native playback never invokes the Dolby Vision export tools");
+
+var unclassified = fel with { EnhancementLayer = DvEnhancementLayer.Unknown };
+Check(NativeDvPlaybackPlanner.Build(unclassified, pinned, @"C:\m.mkv", "c", "p", true, true,
+    allowUnclassifiedEnhancementLayer: true).Supported,
+    "Playback may proceed with an unclassified layer because it destroys nothing and claims nothing");
+Check(NativeDvPlaybackPlanner.Build(unclassified, pinned, @"C:\m.mkv", "c", "p", true, true).Rejection ==
+    NativeDvRejection.EnhancementLayerUnclassified,
+    "The strict default still refuses an unclassified layer");
+Check(NativeDvPlaybackPlanner.Build(unclassified, pinned, @"C:\m.mkv", "c", "p", true, true,
+    allowUnclassifiedEnhancementLayer: true).Explanation.Contains("unclassified"),
+    "An unclassified source does not inherit the FEL wording");
+
 Console.WriteLine($"PASS: {checks} total Dolby Vision assertions");

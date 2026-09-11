@@ -110,7 +110,8 @@ public static class NativeDvPlaybackPlanner
     /// This lane is opt-in: it is never selected implicitly for a Profile 7 source.</summary>
     public static NativeDvPlaybackPlan Build(DvSourceInfo source, NativeDvRuntime runtime, string sourcePath,
         string configDir, string pipeName, bool experimentalLaneEnabled, bool enhancementLayer = true,
-        string hardwareDecoder = "d3d11va", string gpuApi = "d3d11", string gpuContext = "d3d11")
+        string hardwareDecoder = "d3d11va", string gpuApi = "d3d11", string gpuContext = "d3d11",
+        string? logPath = null, PlaybackTarget? target = null, bool allowUnclassifiedEnhancementLayer = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(runtime);
@@ -149,8 +150,12 @@ public static class NativeDvPlaybackPlanner
             return Reject(NativeDvRejection.InvalidSourceFacts, "Base HEVC characteristics are insufficient or inconsistent.");
         if (source.Rpu != DvRpuStatus.Validated)
             return Reject(NativeDvRejection.RpuNotValidated, "Whole-stream RPU validation is required.");
-        // MEL/FEL is never inferred from profile 7 or from el_present_flag.
-        if (source.EnhancementLayer is not (DvEnhancementLayer.Mel or DvEnhancementLayer.Fel))
+        // MEL/FEL is never inferred from profile 7 or from el_present_flag. Export
+        // must refuse an unclassified layer because it decides what gets destroyed.
+        // Playback destroys nothing and never claims composition it did not observe,
+        // so the caller may opt into playing an unclassified source.
+        if (source.EnhancementLayer is not (DvEnhancementLayer.Mel or DvEnhancementLayer.Fel) &&
+            !(allowUnclassifiedEnhancementLayer && source.EnhancementLayer == DvEnhancementLayer.Unknown))
             return Reject(NativeDvRejection.EnhancementLayerUnclassified,
                 "MEL/FEL classification is required before native Profile 7 playback; it is not inferred from the profile.");
         if (source.Hdr10Base != DvCompatibility.Yes)
@@ -160,6 +165,9 @@ public static class NativeDvPlaybackPlanner
             runtime, "gpu-next", gpuApi, gpuContext, hardwareDecoder);
 
         var args = ImmutableArray.CreateBuilder<string>();
+        // The proof ran with --no-config. Keep that: neither the stable mpv-config
+        // nor a user configuration may influence the experimental runtime.
+        args.Add("--no-config");
         args.Add("--config-dir=" + configDir);
         args.Add(@"--input-ipc-server=\\.\pipe\" + pipeName);
         args.Add("--vo=gpu-next");
@@ -169,8 +177,25 @@ public static class NativeDvPlaybackPlanner
         // Zero media-sized scratch is a product invariant of this lane, not a
         // laboratory setting: packets stream through bounded RAM only.
         args.Add("--cache-on-disk=no");
+        if (!string.IsNullOrWhiteSpace(logPath))
+        {
+            // Composition, BL/EL pairing and the Profile 7 splitter have no structured
+            // IPC property in this runtime, so they are read from its own diagnostic
+            // log. Debug level carries all three; trace would add a per-frame shader
+            // line and make the log grow with playback duration. The session lowers
+            // the level over IPC once it has observed, so the log stays bounded.
+            args.Add("--log-file=" + logPath);
+            args.Add("--msg-level=all=warn,mkv=v,vd=v,vf=v,vo/gpu-next=debug");
+        }
         args.Add("--vf=format=enhancement-layer=" + (enhancementLayer ? "yes" : "no"));
         args.Add("--terminal=no");
+        if (target is not null)
+        {
+            args.Add("--screen=" + target.Screen);
+            args.Add("--fs-screen=" + target.Screen);
+            if (target.Fullscreen) args.Add("--fullscreen");
+            else if (target.Width > 0 && target.Height > 0) args.Add($"--autofit={target.Width}x{target.Height}");
+        }
         // Audio, subtitles, chapters and attachments come from the original
         // container and are deliberately left enabled. The laboratory harness
         // disables them for measurement isolation; the player must not.
@@ -178,9 +203,12 @@ public static class NativeDvPlaybackPlanner
         args.Add(sourcePath);
 
         return new NativeDvPlaybackPlan(request, true, NativeDvRejection.None,
-            source.EnhancementLayer == DvEnhancementLayer.Fel
-                ? "Play the authored Profile 7 container directly and request full enhancement-layer composition. No conversion and no media-sized scratch."
-                : "Play the authored Profile 7 container directly. The source is MEL, so no enhancement-layer picture contribution is expected.",
+            source.EnhancementLayer switch
+            {
+                DvEnhancementLayer.Fel => "Play the authored Profile 7 container directly and request full enhancement-layer composition. No conversion and no media-sized scratch.",
+                DvEnhancementLayer.Mel => "Play the authored Profile 7 container directly. The source is MEL, so no enhancement-layer picture contribution is expected.",
+                _ => "Play the authored Profile 7 container directly. The enhancement layer is unclassified, so whether it contributes is decided by what playback observes.",
+            },
             args.ToImmutable());
     }
 }

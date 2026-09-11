@@ -9,6 +9,22 @@ public sealed class PlaybackService
     private readonly Dictionary<string, (DateTime Stamp, bool Vpp, string Version)> _capabilities = [];
     private readonly Dictionary<string, (DateTime Stamp, long Length, MediaInfo Media)> _mediaCache = [];
     private readonly Dictionary<string, SessionDiagnostics> _preparedReports = [];
+    private readonly Dictionary<string, NativeDvLaneOutcome> _nativeOutcomes = [];
+
+    /// <summary>The native Dolby Vision lane. Injectable so tests can drive
+    /// provisioning without reaching the network.</summary>
+    public NativeDvLane? NativeDolbyVision { get; init; }
+
+    /// <summary>What the native lane decided for the most recent preparation,
+    /// including the exact reason when it was not selected.</summary>
+    public NativeDvLaneOutcome? LastNativeOutcome { get; private set; }
+
+    /// <summary>What the most recent native session actually did, as opposed to
+    /// what it asked for. Null when the native lane did not run.</summary>
+    public NativeDvObservation? LastNativeObservation { get; private set; }
+
+    public static string NativeConfigDirectory => Path.Combine(SettingsStore.DirectoryPath, "native-dv-config");
+    public static string NativeLogPath => Path.Combine(DiagnosticsStore.DirectoryPath, "native-dv.log");
 
     public async Task<PlaybackPlan> PrepareAsync(IReadOnlyList<string> items, PlaybackOptions options,
         SystemSummary system, AppSettings settings, PlaybackTarget? destination = null)
@@ -59,6 +75,35 @@ public sealed class PlaybackService
         bool fullscreen = system.Screens.Length > 1 && selected is { Primary: false } && settings.FullscreenExternal;
         var target = destination ?? new PlaybackTarget(selected is null ? 0 : fullscreen ? selected.Width : (int)(selected.WorkWidth * .8),
             selected is null ? 0 : fullscreen ? selected.Height : (int)(selected.WorkHeight * .8), screen, fullscreen, hdrEnabled);
+        // The native Dolby Vision lane is opt-in, applies to a single local file, and
+        // produces a plan only once a provisioned runtime has validated. Any refusal
+        // falls through to the established stable path with the reason recorded.
+        if (NativeDolbyVision is not null && settings.NativeDolbyVisionLane && expanded.Count == 1 && File.Exists(expanded[0]))
+        {
+            string nativePipe = "adaptive-media-native-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(NativeConfigDirectory);
+            Directory.CreateDirectory(DiagnosticsStore.DirectoryPath);
+            var outcome = await NativeDolbyVision.PrepareAsync(expanded[0], settings, NativeConfigDirectory,
+                nativePipe, NativeLogPath, target, new Progress<string>(x => StatusChanged?.Invoke(x)));
+            LastNativeOutcome = outcome;
+            if (outcome.Selected && outcome.Plan is { Supported: true, Request: not null })
+            {
+                DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision runtime selected.");
+                var nativePlan = new PlaybackPlan(outcome.Plan.Executable!, outcome.Plan.Arguments,
+                    options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
+                    "Native Dolby Vision gpu-next", false, false, 1,
+                    [outcome.Plan.Explanation,
+                     "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts."],
+                    nativePipe);
+                if (_preparedReports.Count >= 32) _preparedReports.Clear();
+                if (_nativeOutcomes.Count >= 32) _nativeOutcomes.Clear();
+                _nativeOutcomes[nativePipe] = outcome;
+                _preparedReports[nativePipe] = new() { Plan = nativePlan, MpvVersion = outcome.Runtime!.MpvVersion,
+                    Summary = nativePlan.Summary, Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens } };
+                return nativePlan;
+            }
+            DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason"));
+        }
         var plan = PlaybackPlanBuilder.Build(mpv, Path.Combine(AppContext.BaseDirectory, "mpv-config"), expanded, options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
             new(system.HasNvidia, capability.Vpp, system.NvidiaAdapter, system.NvidiaAdapter?.Contains("RTX", StringComparison.OrdinalIgnoreCase) == true),
             "adaptive-media-" + Guid.NewGuid().ToString("N"), settings.HdmiBitstream, HasStreamHelper(system));
@@ -72,6 +117,7 @@ public sealed class PlaybackService
     public async Task<int> LaunchAsync(PlaybackPlan plan, double? stopAfterSeconds = null)
     {
         _preparedReports.TryGetValue(plan.PipeName, out var prepared);
+        LastNativeObservation = null;
         LastReport = new() { Plan = plan, Summary = plan.Summary, MpvVersion = prepared?.MpvVersion ?? "unknown", Hardware = prepared?.Hardware };
         using var hdrSession = HdrSession.Begin(plan, LastReport);
         DiagnosticsStore.Event("info", "playback-plan", plan.Renderer);
@@ -140,6 +186,29 @@ public sealed class PlaybackService
                     const string reason = "Smooth motion was disabled because display timing became unstable.";
                     if (!LastReport.FallbackHistory.Contains(reason)) { LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason); DiagnosticsStore.Event("warning", "motion-fallback", reason); }
                 }
+                if (_nativeOutcomes.TryGetValue(plan.PipeName, out var native) && LastNativeObservation is null &&
+                    native.Plan?.Request is not null && NativeDolbyVision?.Descriptor is not null)
+                {
+                    string? version = LastReport!.Observed.TryGetValue("mpv-version", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                    string log = ReadSharedText(NativeLogPath);
+                    var observation = NativeDvLogEvidence.Reduce(log, version, NativeDolbyVision.Descriptor.MpvCommit,
+                        native.Plan.Request.EnhancementLayer,
+                        LastReport.Observed.TryGetValue("hwdec-current", out var hw) && hw.ValueKind == JsonValueKind.String ? hw.GetString() : null,
+                        LastReport.Observed.TryGetValue("gpu-api", out var api) ? api.ToString() : null,
+                        LastReport.Observed.TryGetValue("gpu-context", out var ctx) ? ctx.ToString() : null);
+                    // Only settle once the renderer has actually reported; before that
+                    // an all-Unknown reading would just be "too early", not a result.
+                    if (observation.Renderer == DvObservedState.Active)
+                    {
+                        LastNativeObservation = observation;
+                        LastReport.FallbackHistory.Add(observation.Summary);
+                        StatusChanged?.Invoke(observation.Summary);
+                        DiagnosticsStore.Event("info", "native-dv-observed", observation.Summary);
+                        // Composition state does not change mid-file, so stop the
+                        // diagnostic log growing for the rest of a feature-length film.
+                        await ipc.CommandAsync(["set_property", "msg-level", "all=no"], queryTimeout.Token);
+                    }
+                }
                 if (LastReport!.Observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
                     StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString());
                 if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds) { await ipc.CommandAsync(["quit"], queryTimeout.Token); return; }
@@ -154,6 +223,19 @@ public sealed class PlaybackService
                 DiagnosticsStore.Event("warning", "ipc-unavailable", ex.ToString());
             }
         }
+    }
+
+    /// <summary>Read a file the player still holds open for writing.</summary>
+    private static string ReadSharedText(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+        catch (IOException) { return string.Empty; }
+        catch (UnauthorizedAccessException) { return string.Empty; }
     }
 
     // The inventory helper can fail and leave a default summary, so confirm PATH before claiming yt-dlp is absent.

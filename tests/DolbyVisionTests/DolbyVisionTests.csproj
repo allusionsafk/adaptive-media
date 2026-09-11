@@ -3,6 +3,10 @@
   <ItemGroup>
     <Compile Include="../../src/AdaptiveMedia.App/DvConversion*.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/NativeDvPlayback.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/NativeDvRuntimeStore.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/NativeDvLane.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/NativeProcess.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />
   </ItemGroup>

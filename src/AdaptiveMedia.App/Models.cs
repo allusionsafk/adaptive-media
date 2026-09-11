@@ -36,6 +36,10 @@ public sealed class AppSettings
     public bool DefaultCleanup { get; set; } = false;
     public string DefaultCleanupMode { get; set; } = "Legacy";
     public bool DefaultRtxHdr { get; set; } = false;
+    // Experimental. Off by default: the lane needs a separately provisioned runtime
+    // and is never selected implicitly for a Profile 7 source.
+    public bool NativeDolbyVisionLane { get; set; } = false;
+    public bool AllowNativeDolbyVisionDownload { get; set; } = true;
     [System.Text.Json.Serialization.JsonExtensionData]
     public System.Collections.Generic.Dictionary<string, System.Text.Json.JsonElement> ExtraSettings { get; set; } = new();
 }
