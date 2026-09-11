@@ -323,7 +323,7 @@ public sealed class NativeDvRuntimeStore
     private static async Task DownloadAsync(Uri source, string destinationPath, CancellationToken cancellation)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("Adaptive-Media/0.4");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Adaptive-Media-Player/0.4");
         using var response = await client.GetAsync(source, HttpCompletionOption.ResponseHeadersRead, cancellation);
         response.EnsureSuccessStatusCode();
         await using var input = await response.Content.ReadAsStreamAsync(cancellation);

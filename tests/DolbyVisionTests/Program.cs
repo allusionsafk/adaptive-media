@@ -294,6 +294,20 @@ try
     Check(recovering.CleanupStaging() == 0 && Directory.Exists(Path.Combine(root7, descriptor.VersionId)),
         "Cleanup removes staging only, never a promoted generation");
 
+    // Promotion conflict: another instance already occupied the generation with
+    // something that does not validate. The loser must report the failure rather
+    // than overwrite or claim success.
+    string rootRace = Path.Combine(testRoot, "race");
+    string occupied = Path.Combine(rootRace, descriptor.VersionId);
+    Directory.CreateDirectory(occupied);
+    File.WriteAllBytes(Path.Combine(occupied, "mpv.exe"), System.Text.Encoding.UTF8.GetBytes("squatter"));
+    var racing = new NativeDvRuntimeStore(rootRace, Fetch(archiveBytes), Extract());
+    var raceResult = await racing.ProvisionAsync(descriptor, allowDownload: true);
+    Check(raceResult.State == NativeDvRuntimeState.PromotionFailed && !raceResult.IsUsable,
+        "A generation already occupied by an invalid tree fails promotion instead of claiming success");
+    Check(File.ReadAllBytes(Path.Combine(occupied, "mpv.exe")).Length == 8,
+        "A failed promotion never overwrites what was already there");
+
     // A runtime that cannot compose is refused even when every file validates.
     var oldPlacebo = NativeDvRuntimeDescriptor.FromManifestJson(ManifestJson(placeboApi: 369));
     string root8 = Path.Combine(testRoot, "store8");
@@ -303,7 +317,7 @@ try
         "A runtime below the composing libplacebo API is refused rather than silently degraded");
 
     // Nothing may be installed outside the application's own root.
-    Check(Directory.GetDirectories(testRoot).All(x => Path.GetFileName(x) is "runtimes" or "store2" or "store3" or "store4" or "store5" or "store6" or "store7" or "store8"),
+    Check(Directory.GetDirectories(testRoot).All(x => Path.GetFileName(x) is "runtimes" or "store2" or "store3" or "store4" or "store5" or "store6" or "store7" or "store8" or "race" or "lane" or "blocked"),
         "The store writes only inside the roots it was given");
     Check(!Directory.Exists(@"C:\mpv\" + descriptor.VersionId), "Provisioning never installs into the stable runtime location");
 
