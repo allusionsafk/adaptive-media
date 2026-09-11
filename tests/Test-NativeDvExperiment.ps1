@@ -353,6 +353,24 @@ try {
     Assert-Equal 'MediaPayload' (Test-NativeDvMediaArtifact -Path (Join-Path $monitored 'progressive-cache.bin') -Length 2048 -GrowthBytes 2048 -BoundedStateMaxBytes 1024).Classification 'growing oversized cache is media payload'
     Assert-Equal 'Unknown' (Test-NativeDvMediaArtifact -Path (Join-Path $monitored 'oversized.log') -Length 2048 -GrowthBytes 2048 -BoundedStateMaxBytes 1024).Classification 'oversized ordinary state is not silently accepted'
 
+    # --- Native playback must not be wired to Compatibility Export -----------
+    # The evidence adapter extracts an elementary stream, which for the authored
+    # source would be roughly 73 GB of scratch. The native playback lane must never
+    # reach it, nor the conversion planner or executor. This is a source-level
+    # boundary so that wiring them together later fails here rather than in
+    # production.
+    foreach ($laneFile in @('src\AdaptiveMedia.App\NativeDvLane.cs', 'src\AdaptiveMedia.App\NativeDvPlayback.cs', 'src\AdaptiveMedia.App\NativeDvRuntimeStore.cs')) {
+        $lanePath = Join-Path $root $laneFile
+        Assert-True (Test-Path -LiteralPath $lanePath) "native lane source must exist: $laneFile"
+        $laneText = Get-Content -LiteralPath $lanePath -Raw
+        # Strip comments entirely: this boundary is about code references, so prose
+        # that explains why the lane avoids these types must not trip it.
+        $laneCode = ($laneText -split "`n" | ForEach-Object { ($_ -replace '//.*$', '') }) -join "`n"
+        foreach ($forbidden in @('DvEvidenceAdapter', 'DvMatroskaP81Executor', 'DvConversionPlanner', 'mkvextract', 'mkvmerge')) {
+            Assert-True (-not ($laneCode -match [regex]::Escape($forbidden))) "$laneFile must not reference $forbidden"
+        }
+    }
+
     $identity = Get-NativeDvSourceIdentity -Path $sourcePath -SentinelBytes 32
     $same = Test-NativeDvSourceIdentity -Path $sourcePath -ExpectedIdentity $identity
     Assert-True $same.Matches 'unchanged source identity must pass'

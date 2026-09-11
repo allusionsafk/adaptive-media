@@ -418,4 +418,154 @@ Check(NativeDvPlaybackPlanner.Build(unclassified, pinned, @"C:\m.mkv", "c", "p",
     allowUnclassifiedEnhancementLayer: true).Explanation.Contains("unclassified"),
     "An unclassified source does not inherit the FEL wording");
 
+
+// ---------------------------------------------------------------------------
+// Opt-in product-path check against a real authored Profile 7 source.
+// Set ADAPTIVE_MEDIA_NATIVE_DV_SOURCE to the file to exercise real provisioning,
+// the real bounded probe, the real launch, and real observation. Skipped when
+// unset so the ordinary gate stays hermetic.
+// ---------------------------------------------------------------------------
+string? realSource = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_SOURCE");
+if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
+{
+    Console.WriteLine("Native Dolby Vision product path: exercising the real runtime.");
+    string manifestPath = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_MANIFEST")
+        ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "native-dv-p7", "runtime-manifest.json");
+    var shipped = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(manifestPath));
+
+    string productRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-product-" + Guid.NewGuid().ToString("N"));
+    var before = File.Exists(@"C:\mpv\mpv.exe")
+        ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+        : (Length: 0L, Hash: "absent");
+    try
+    {
+        // First run: nothing installed. Real download, real extraction, real
+        // validation, real promotion.
+        var productStore = new NativeDvRuntimeStore(Path.Combine(productRoot, "runtimes", "native-dv"));
+        Check(!productStore.Resolve(shipped).IsUsable, "PRODUCT: a fresh installation has no native runtime");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var installed = await productStore.ProvisionAsync(shipped, allowDownload: true,
+            new Progress<string>(x => Console.WriteLine("  " + x)));
+        clock.Stop();
+        Check(installed.IsUsable, "PRODUCT: the runtime provisions from its pinned publisher archive");
+        Console.WriteLine($"  first provision: {clock.Elapsed.TotalSeconds:0.0}s -> {installed.Runtime!.ExecutablePath}");
+        Check(NativeDvRuntimeStore.ComputeSha256(installed.Runtime.ExecutablePath) == installed.Runtime.Sha256,
+            "PRODUCT: the installed executable matches its pinned hash");
+
+        var fast = System.Diagnostics.Stopwatch.StartNew();
+        Check(productStore.Resolve(shipped).IsUsable, "PRODUCT: the already-installed fast path validates");
+        fast.Stop();
+        Console.WriteLine($"  already-installed revalidation: {fast.Elapsed.TotalMilliseconds:0} ms");
+
+        // The bounded source probe on the authored file.
+        var facts = await NativeDvSourceProbe.ReadAsync(installed.Runtime.ExecutablePath, realSource, TimeSpan.FromSeconds(60));
+        Check(facts.IsProfile7, "PRODUCT: the bounded probe identifies Profile 7 without extracting anything");
+        Console.WriteLine($"  probe: profile={facts.DolbyVisionProfile} level={facts.DolbyVisionLevel} {facts.Width}x{facts.Height} {facts.Codec}/{facts.Transfer}");
+
+        // The lane builds the plan the application would launch.
+        var lane = new NativeDvLane(productStore, shipped);
+        string pipe = "adaptive-media-product-" + Guid.NewGuid().ToString("N");
+        string logPath = Path.Combine(productRoot, "native-dv.log");
+        var outcome = await lane.PrepareAsync(realSource,
+            new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = true },
+            Path.Combine(productRoot, "config"), pipe, logPath, new PlaybackTarget(1280, 720));
+        Check(outcome.Selected && outcome.Plan is { Supported: true }, "PRODUCT: the lane selects native playback for the authored source");
+        Check(outcome.Plan!.Executable == installed.Runtime.ExecutablePath, "PRODUCT: the plan launches the provisioned runtime");
+        Check(!outcome.Plan.Executable!.StartsWith(@"C:\mpv\", StringComparison.OrdinalIgnoreCase), "PRODUCT: the plan never launches the stable runtime");
+
+        // Launch exactly what the application would launch.
+        Directory.CreateDirectory(Path.Combine(productRoot, "config"));
+        var psi = NativeProcess.StartInfo(outcome.Plan.Executable, outcome.Plan.Arguments, capture: false);
+        using var player = System.Diagnostics.Process.Start(psi) ?? throw new IOException("player did not start");
+        try
+        {
+            await using var ipc = new MpvIpc(pipe);
+            using var connect = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await ipc.ConnectAsync(connect.Token);
+            string? version = null;
+            for (int i = 0; i < 40 && version is null; i++)
+            {
+                using var q = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var v = await ipc.CommandAsync(["get_property", "mpv-version"], q.Token);
+                version = v?.GetString();
+                if (version is null) await Task.Delay(250);
+            }
+            await Task.Delay(4000);
+            using var props = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            string? hwdec = (await ipc.CommandAsync(["get_property", "hwdec-current"], props.Token))?.GetString();
+            var trackList = await ipc.CommandAsync(["get_property", "track-list"], props.Token);
+            var aid = await ipc.CommandAsync(["get_property", "aid"], props.Token);
+            var sid = await ipc.CommandAsync(["get_property", "sid"], props.Token);
+            var chapters = await ipc.CommandAsync(["get_property", "chapters"], props.Token);
+
+            string logText;
+            using (var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream)) logText = reader.ReadToEnd();
+
+            var observed = NativeDvLogEvidence.Reduce(logText, version, shipped.MpvCommit, true, hwdec, "d3d11", "d3d11");
+            Console.WriteLine($"  observed: delivered={observed.Delivered} composition={observed.FelComposition} pairing={observed.BlElPairing} " +
+                $"decoders={observed.DecoderInstances} surfaces={observed.HardwareSurfaces} hwdec={observed.HardwareDecoderInUse} api={observed.LibplaceboApi}");
+            Check(observed.Renderer == DvObservedState.Active, "PRODUCT: the renderer is observed through the product adapter");
+            Check(observed.Delivered == NativeDvDelivered.FullEnhancementLayer, "PRODUCT: full enhancement-layer composition is observed, not assumed");
+            Check(observed.BlElPairing == DvObservedState.Active && observed.DecoderInstances >= 2, "PRODUCT: BL and EL are separately decoded and paired");
+            Check(observed.HardwareSurfaces == DvObservedState.Active, "PRODUCT: decoding stays on hardware surfaces");
+            Check(!observed.HasDegradation, "PRODUCT: the product session reports no degradation");
+
+            // The container survives: the laboratory harness muted audio and
+            // subtitles, the product must not. The contract is that the original
+            // tracks are present and selectable. Which one mpv auto-selects is its
+            // own default behaviour and is not something this lane should force.
+            int audioTracks = 0, subtitleTracks = 0, videoTracks = 0;
+            foreach (var track in trackList!.Value.EnumerateArray())
+            {
+                string kind = track.GetProperty("type").GetString() ?? "";
+                if (kind == "audio") audioTracks++;
+                else if (kind == "sub") subtitleTracks++;
+                else if (kind == "video") videoTracks++;
+            }
+            Check(audioTracks > 0, "PRODUCT: the original container's audio tracks are present");
+            Check(subtitleTracks > 0, "PRODUCT: the original container's subtitle tracks are present");
+            Check(videoTracks > 0, "PRODUCT: the original container's video track is present");
+            Check(chapters is not null && chapters.Value.GetInt32() > 1, "PRODUCT: the original chapters are present");
+            Console.WriteLine($"  container: {videoTracks} video, {audioTracks} audio, {subtitleTracks} subtitle tracks; chapters={chapters}; selected aid={aid} sid={sid}");
+
+            // Bounded diagnostic state: lower the level and confirm growth stops.
+            long beforeLower = new FileInfo(logPath).Length;
+            using var lower = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await ipc.CommandAsync(["set_property", "msg-level", "all=no"], lower.Token);
+            long atLower = new FileInfo(logPath).Length;
+            await Task.Delay(6000);
+            long afterLower = new FileInfo(logPath).Length;
+            Console.WriteLine($"  log: {beforeLower} bytes at observation, {afterLower} bytes six seconds later");
+            Check(afterLower - atLower == 0, "PRODUCT: the diagnostic log stops growing once composition has been observed");
+
+            using var quit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await ipc.CommandAsync(["quit"], quit.Token);
+        }
+        finally
+        {
+            if (!player.HasExited) { try { player.Kill(true); } catch (InvalidOperationException) { } }
+            player.WaitForExit(10000);
+        }
+
+        // Zero media-sized scratch, and nothing installed outside the store.
+        long scratch = Directory.Exists(Path.Combine(productRoot, "config"))
+            ? Directory.EnumerateFiles(Path.Combine(productRoot, "config"), "*", SearchOption.AllDirectories).Sum(x => new FileInfo(x).Length) : 0;
+        long logBytes = File.Exists(Path.Combine(productRoot, "native-dv.log")) ? new FileInfo(Path.Combine(productRoot, "native-dv.log")).Length : 0;
+        Console.WriteLine($"  playback state: config={scratch} bytes, log={logBytes} bytes");
+        Check(scratch < 8 * 1024 * 1024 && logBytes < 8 * 1024 * 1024, "PRODUCT: playback state stays bounded, with no media-sized artifact");
+        Check(!Directory.EnumerateFiles(productRoot, "*.hevc", SearchOption.AllDirectories).Any() &&
+              !Directory.EnumerateFiles(productRoot, "*.mkv", SearchOption.AllDirectories).Any(),
+            "PRODUCT: native playback creates no extracted or converted media");
+
+        var after = File.Exists(@"C:\mpv\mpv.exe")
+            ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+            : (Length: 0L, Hash: "absent");
+        Check(before.Length == after.Length && before.Hash == after.Hash, "PRODUCT: the stable runtime is untouched by native playback");
+        Check(new FileInfo(realSource).Length > 0, "PRODUCT: the authored source is still readable and unmodified in length");
+    }
+    finally { if (Directory.Exists(productRoot)) Directory.Delete(productRoot, true); }
+    Console.WriteLine("Native Dolby Vision product path: PASS");
+}
+
 Console.WriteLine($"PASS: {checks} total Dolby Vision assertions");

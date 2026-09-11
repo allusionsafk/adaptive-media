@@ -1,7 +1,7 @@
 <Window x:Class="AdaptiveMedia.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Adaptive Media Settings" Width="660" Height="520" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" Background="#F4F6F9">
+        Title="Adaptive Media Settings" Width="660" Height="620" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" Background="#F4F6F9">
     <Grid Margin="26">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -19,6 +19,10 @@
             <CheckBox x:Name="BitstreamCheck" Content="Enable HDMI bitstream for AC-3 / E-AC-3 / TrueHD / DTS-HD when HDMI is active" Margin="0,10"/>
             <TextBlock Text="Leave bitstream off for laptop speakers, ordinary TV speakers, Bluetooth, USB audio, or Dolby Atmos for Headphones." TextWrapping="Wrap" Foreground="#667085" Margin="24,0,0,10"/>
             <CheckBox x:Name="MpcCheck" Content="Offer MPC-BE if MPV reports a playback failure" Margin="0,10"/>
+            <Separator Margin="0,14,0,10"/>
+            <CheckBox x:Name="NativeDvCheck" Content="Experimental: play Dolby Vision Profile 7 natively, with its enhancement layer" Margin="0,6"/>
+            <TextBlock Text="Uses a separate player runtime that Adaptive Media installs and verifies on its own, alongside your normal player. Ordinary playback is unaffected. Whether the enhancement layer is actually composed is reported after playback starts; it is never assumed." TextWrapping="Wrap" Foreground="#667085" Margin="24,0,0,8"/>
+            <CheckBox x:Name="NativeDvDownloadCheck" Content="Download that runtime automatically when it is needed" Margin="24,0,0,10"/>
         </StackPanel>
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Cancel" IsCancel="True" Margin="0,0,10,0"/>
