@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support guide
+    url: https://github.com/allusionsafk/adaptive-media/blob/main/SUPPORT.md
+    about: Check the current support boundary before filing a compatibility report.
+  - name: Security report
+    url: https://github.com/allusionsafk/adaptive-media/security/advisories/new
+    about: Report security and privacy issues privately.
