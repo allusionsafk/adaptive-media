@@ -8,6 +8,23 @@ derived from that generator, not transcribed by hand. All seventeen gate checks
 pass; feeding the generator a non-identical control run flips the gate to
 `unsupported`, so the gate is load-bearing rather than decorative.
 
+## Runtime this evidence belongs to
+
+Everything below was produced by mpv `0.41.0-1042-g7e4cb538a`
+(commit `7e4cb538a3f30d25920ad8e87ba6571540fb729f`), which was the pinned runtime
+when these runs were made. On 2026-09-12 the shipped manifest moved to
+`0.41.0-1044-g14f2d48cb`, whose diagnostic contract was re-verified against the
+same authored source: Profile 7 splitter, two HEVC decoder instances,
+`[vf] [el_pair]`, hardware `d3d11va`, libplacebo API 371, and
+`sh_dovi_compose_nlq` present with the enhancement layer enabled and absent with
+it disabled.
+
+The A/B and determinism figures here were **not** re-measured on the newer
+runtime and are not claimed for it. `scripts/New-NativeDvEvidenceSummary.ps1`
+refuses to regenerate this summary against a manifest whose commit disagrees with
+the runtime that produced the runs, so the two cannot be silently conflated; pass
+`-RuntimeManifest` pointing at the manifest those runs used.
+
 ## What was run
 
 Three runs, identical in every variable except the enhancement-layer request,

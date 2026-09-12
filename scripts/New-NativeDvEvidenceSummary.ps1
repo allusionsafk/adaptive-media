@@ -134,6 +134,17 @@ function Get-RunEvidence {
 }
 
 $runtime = Read-Json $RuntimeManifest
+# The manifest names whatever runtime is pinned today, but the evidence was
+# gathered by whichever runtime actually ran. Stamping a repinned manifest onto
+# older runs would silently attribute the proof to a build that never produced
+# it, so refuse when they disagree.
+$evidenceVersion = [string](Read-Json (Join-Path ([IO.Path]::GetFullPath((Join-Path $RunRoot $FelOnRunId))) 'ipc-snapshots.json')).Launch.'mpv-version'
+$manifestCommit = [string]$runtime.mpv.commit
+$shortCommit = if ($manifestCommit.Length -ge 9) { $manifestCommit.Substring(0, 9) } else { $manifestCommit }
+if ($evidenceVersion -and -not $evidenceVersion.Contains($shortCommit)) {
+    throw ("The pinned manifest describes mpv $manifestCommit but the evidence in '$FelOnRunId' was produced by '$evidenceVersion'. " +
+        'Pass -RuntimeManifest pointing at the manifest those runs used, or regenerate the evidence with the current runtime.')
+}
 $felOn = Get-RunEvidence -RunId $FelOnRunId
 $felOnControl = Get-RunEvidence -RunId $FelOnControlRunId
 $felOff = Get-RunEvidence -RunId $FelOffRunId
