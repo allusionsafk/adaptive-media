@@ -1,40 +1,39 @@
 # Adaptive Media product principles
 
-Adaptive Media is a native Windows media player for people who want dependable playback first and optional enhancement when they ask for it.
+Adaptive Media is a native Windows media player for users who want dependable playback first and optional enhancement when they choose it.
 
-## Product contract
+## Product goals
 
-Opening a file should not require the user to understand mpv, FFmpeg, GPU APIs, or codec plumbing.
+Opening a file should not require knowledge of mpv, FFmpeg, GPU APIs, or codec internals.
 
 The application should:
 
-- make the default playback path dependable
-- keep enhancement choices explicit
-- explain when the requested path is unavailable or degraded
+- keep the default playback path dependable
+- make enhancement choices explicit
+- explain when a requested path is unavailable or degraded
 - distinguish requested settings from observed runtime state
 - keep advanced hardware detail available without making it the main interface
-- preserve keyboard access, readable contrast, DPI-aware sizing, and clear wrapped copy
+- preserve keyboard access, readable contrast, DPI-aware sizing, and clear text layout
 
-## Reference first
+## Playback defaults
 
-Reference playback should preserve source presentation unless a conversion is required by the output device or the user deliberately enables an enhancement.
+Reference playback should preserve the source presentation unless the output device requires conversion or the user enables an enhancement.
 
-Do not silently enable motion interpolation, synthetic HDR, aggressive sharpening, denoising, or reconstruction.
+Motion interpolation, synthetic HDR, aggressive sharpening, denoising, and reconstruction should not be enabled silently.
 
-## Interface direction
+## Interface
 
-The current Windows application uses familiar native controls, restrained colour, and progressive disclosure.
+The Windows application uses familiar native controls, restrained colour, and progressive disclosure.
 
-Media actions and playback choices should remain more prominent than implementation detail. Technical state belongs in diagnostics and evidence surfaces where it can explain what the application actually did.
+Media actions and playback choices should be more prominent than implementation details. Technical state belongs in diagnostics and status views where it can explain what the application did.
 
 Avoid:
 
 - console windows as normal product UI
-- fake technical atmosphere
 - unsupported format claims
 - requested settings presented as active state
-- visual effects that make the interface slower without improving comprehension
+- decorative effects that reduce clarity or responsiveness
 
 ## Naming
 
-Adaptive Media remains the repository and engineering name. Any future public-facing rename is a separate decision and should not be baked into shared APIs, file formats, or internal contracts prematurely.
+Adaptive Media remains the repository and engineering name. Any future public-facing rename should be handled separately rather than embedded early in APIs, file formats, or internal contracts.
