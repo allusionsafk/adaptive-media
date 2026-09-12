@@ -284,6 +284,70 @@ public enum NativeDvPlaybackStatus
     MediaOrUserOutcome = 6,
 }
 
+/// <summary>What a native attempt's outcome leads to next.</summary>
+public enum NativeDvNextStep
+{
+    /// <summary>Nothing further: this attempt is the result.</summary>
+    Finish = 0,
+    /// <summary>Retry once on the retained previous generation.</summary>
+    RetryOnPreviousRuntime = 1,
+    /// <summary>The native lane is finished for this playback; use the established
+    /// stable path.</summary>
+    UseStablePlayback = 2,
+}
+
+public sealed record NativeDvRollbackDecision(NativeDvNextStep Step, NativeDvPlaybackStatus Status, string Explanation);
+
+/// <summary>What happens after a native attempt, as a pure decision.
+///
+/// This is separate from the code that launches players so the rules that matter
+/// most can be tested directly: that a healthy or merely unlucky attempt is never
+/// rolled back, that at most one rollback ever happens, and that once the cap is
+/// reached no fallback is even looked for.</summary>
+public static class NativeDvRollbackPolicy
+{
+    /// <summary>Maximum automatic native runtime rollbacks per playback. One.
+    ///
+    /// This is the whole loop prevention. After a single rollback the native lane
+    /// is finished for this playback, so no sequence of failures can produce a
+    /// third native launch.</summary>
+    public const int MaximumRollbacks = 1;
+
+    public static NativeDvRollbackDecision Decide(NativeDvHealthVerdict verdict, int rollbacksAlreadyDone,
+        NativeDvFallbackCandidate? fallback)
+    {
+        ArgumentNullException.ThrowIfNull(verdict);
+
+        if (!verdict.RollbackCandidate)
+        {
+            var status = verdict.Health switch
+            {
+                NativeDvHealth.Healthy => rollbacksAlreadyDone > 0
+                    ? NativeDvPlaybackStatus.RolledBackToPreviousRuntime
+                    : NativeDvPlaybackStatus.RuntimeHealthy,
+                NativeDvHealth.Unknown or NativeDvHealth.FailedAfterUsefulPlayback => NativeDvPlaybackStatus.HealthUnknown,
+                NativeDvHealth.NotEvaluated => NativeDvPlaybackStatus.NotUsed,
+                _ => NativeDvPlaybackStatus.MediaOrUserOutcome,
+            };
+            return new(NativeDvNextStep.Finish, status, verdict.Explanation);
+        }
+
+        // The cap is tested before a fallback is even considered. Checking
+        // availability first would make the limit depend on what happens to be on
+        // disk, which is exactly how a bounce becomes possible.
+        if (rollbacksAlreadyDone >= MaximumRollbacks)
+            return new(NativeDvNextStep.UseStablePlayback, NativeDvPlaybackStatus.PreviousRuntimeAlsoFailed,
+                "The retained native Dolby Vision runtime has already had its one attempt; using stable playback.");
+
+        if (fallback is null || !fallback.IsUsable)
+            return new(NativeDvNextStep.UseStablePlayback, NativeDvPlaybackStatus.PreviousRuntimeUnavailable,
+                fallback?.Reason ?? "No retained native Dolby Vision runtime is available.");
+
+        return new(NativeDvNextStep.RetryOnPreviousRuntime, NativeDvPlaybackStatus.RolledBackToPreviousRuntime,
+            $"The current native Dolby Vision runtime failed; retrying once on the retained runtime {fallback.Descriptor!.MpvVersion}.");
+    }
+}
+
 public static class NativeDvPlaybackStatusText
 {
     /// <summary>One product-facing line. None of these claims a composition

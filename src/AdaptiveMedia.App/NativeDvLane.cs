@@ -252,16 +252,7 @@ public sealed class NativeDvLane
             return NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.Installed,
                 "This source is not Dolby Vision Profile 7.", facts);
 
-        // The probe establishes Profile 7 but not MEL versus FEL. Classifying that
-        // up front would mean extracting an elementary stream, which is exactly the
-        // media-sized scratch this lane exists to avoid. Playback destroys nothing,
-        // so the layer is left unclassified and what it contributes is decided by
-        // what the run actually observes.
-        var source = new DvSourceInfo(DvDetection.Detected, facts.DolbyVisionProfile, 6,
-            new MediaInfo(Width: facts.Width, Height: facts.Height, Codec: facts.Codec,
-                Transfer: facts.Transfer, Primaries: facts.Primaries),
-            DvCompatibility.Yes, DvEnhancementLayer.Unknown, DvRpuStatus.Validated, 10,
-            "Bounded one-frame runtime probe: dolby-vision-profile reported by the pinned runtime.");
+        var source = SourceFromFacts(facts);
 
         var plan = NativeDvPlaybackPlanner.Build(source, resolution.Runtime, Path.GetFullPath(sourcePath),
             configDir, pipeName, experimentalLaneEnabled: true, enhancementLayer: true,
@@ -270,5 +261,46 @@ public sealed class NativeDvLane
             return NativeDvLaneOutcome.NotSelected(resolution.State, plan.Explanation, facts);
 
         return new NativeDvLaneOutcome(true, resolution.State, plan, resolution.Runtime, facts, null);
+    }
+
+    /// <summary>The probe establishes Profile 7 but not MEL versus FEL. Classifying
+    /// that up front would mean extracting an elementary stream, which is exactly
+    /// the media-sized scratch this lane exists to avoid. Playback destroys nothing,
+    /// so the layer is left unclassified and what it contributes is decided by what
+    /// the run actually observes.</summary>
+    private static DvSourceInfo SourceFromFacts(NativeDvSourceFacts facts) =>
+        new(DvDetection.Detected, facts.DolbyVisionProfile, 6,
+            new MediaInfo(Width: facts.Width, Height: facts.Height, Codec: facts.Codec,
+                Transfer: facts.Transfer, Primaries: facts.Primaries),
+            DvCompatibility.Yes, DvEnhancementLayer.Unknown, DvRpuStatus.Validated, 10,
+            "Bounded one-frame runtime probe: dolby-vision-profile reported by the pinned runtime.");
+
+    /// <summary>Rebuild a selected outcome's plan against a different, already
+    /// validated runtime generation.
+    ///
+    /// The source facts are reused because they describe the container, not the
+    /// runtime, and the file has not changed. Nothing is re-probed and nothing is
+    /// reconciled: choosing another generation to run must not be able to install,
+    /// promote, or collect anything, and must not disturb which generation is
+    /// current.
+    ///
+    /// The new plan carries its own pipe and its own diagnostic log, so the attempt
+    /// it describes establishes what it composed from its own evidence and cannot
+    /// inherit a result from the attempt it is replacing.</summary>
+    public static NativeDvLaneOutcome WithRuntime(NativeDvLaneOutcome selected, NativeDvRuntime runtime,
+        string sourcePath, string configDir, string pipeName, string? logPath, PlaybackTarget? target)
+    {
+        ArgumentNullException.ThrowIfNull(selected);
+        ArgumentNullException.ThrowIfNull(runtime);
+        if (!selected.Selected)
+            throw new ArgumentException("Only a selected native outcome can be rebuilt.", nameof(selected));
+
+        var plan = NativeDvPlaybackPlanner.Build(SourceFromFacts(selected.SourceFacts), runtime,
+            Path.GetFullPath(sourcePath), configDir, pipeName, experimentalLaneEnabled: true,
+            enhancementLayer: true, logPath: logPath, target: target,
+            allowUnclassifiedEnhancementLayer: true);
+        return plan.Supported
+            ? new NativeDvLaneOutcome(true, NativeDvRuntimeState.Installed, plan, runtime, selected.SourceFacts, null)
+            : NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.Installed, plan.Explanation, selected.SourceFacts);
     }
 }

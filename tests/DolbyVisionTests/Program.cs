@@ -990,6 +990,195 @@ try
 }
 finally { if (Directory.Exists(healthRoot)) Directory.Delete(healthRoot, true); }
 
+
+// ---------------------------------------------------------------------------
+// Rollback policy: what an attempt's outcome leads to next.
+//
+// This is the decision the orchestration is built on, kept pure so the rules
+// that matter most can be tested directly rather than inferred from a launch.
+// ---------------------------------------------------------------------------
+string policyRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-policy-" + Guid.NewGuid().ToString("N"));
+try
+{
+    // A usable fallback, built the way the lifecycle builds one.
+    var pRuntime = new NativeDvRuntime(Path.Combine(policyRoot, "gen", "mpv.exe"), new string('a', 64), "0.41.0-1042-g7e4cb538a", 371);
+    var pDescriptor = NativeDvRuntimeDescriptor.FromManifestJson($$"""
+    {
+      "schemaVersion": 1,
+      "provider": { "name": "test", "releaseUrl": "https://example.invalid/r" },
+      "archive": { "url": "https://example.invalid/p.7z", "bytes": 8, "sha256": "{{new string('b', 64)}}" },
+      "runtime": { "executable": { "pathRelativeToManifest": "./extracted/mpv.exe", "bytes": 8, "sha256": "{{new string('a', 64)}}" } },
+      "mpv": { "version": "0.41.0-1042-g7e4cb538a", "commit": "{{NativeDvDiagnosticAdapters.Supported[0].MpvCommit}}" },
+      "libplacebo": { "apiVersion": 371 }
+    }
+    """);
+    var usableFallback = new NativeDvFallbackCandidate(NativeDvFallbackState.Available,
+        pDescriptor.VersionId, pDescriptor, pRuntime, "available");
+    var missingFallback = new NativeDvFallbackCandidate(NativeDvFallbackState.NoPreviousGeneration,
+        null, null, null, "No previous native Dolby Vision runtime is retained.");
+    var invalidFallback = new NativeDvFallbackCandidate(NativeDvFallbackState.StructurallyInvalid,
+        pDescriptor.VersionId, pDescriptor, null, "does not match its pinned SHA-256");
+    var unsupportedFallbackCandidate = new NativeDvFallbackCandidate(NativeDvFallbackState.AdapterUnsupported,
+        pDescriptor.VersionId, pDescriptor, null, "no verified way to read diagnostics");
+
+    // Case 1: current succeeds, so no rollback and no fallback is even consulted.
+    var healthyDecision = NativeDvRollbackPolicy.Decide(healthy, 0, usableFallback);
+    Check(healthyDecision.Step == NativeDvNextStep.Finish && healthyDecision.Status == NativeDvPlaybackStatus.RuntimeHealthy,
+        "A healthy attempt finishes with no rollback even when a fallback is available");
+
+    // Case 2: current fails, previous is valid, so retry exactly once.
+    var retryDecision = NativeDvRollbackPolicy.Decide(rendererFailed, 0, usableFallback);
+    Check(retryDecision.Step == NativeDvNextStep.RetryOnPreviousRuntime, "An eligible failure with a valid fallback retries on the previous runtime");
+    Check(retryDecision.Explanation.Contains(pDescriptor.MpvVersion), "The retry names the runtime it is falling back to");
+    // And when that retry succeeds, the session says so rather than claiming the
+    // current runtime was fine.
+    var afterRetrySucceeded = NativeDvRollbackPolicy.Decide(healthy, 1, null);
+    Check(afterRetrySucceeded.Step == NativeDvNextStep.Finish &&
+          afterRetrySucceeded.Status == NativeDvPlaybackStatus.RolledBackToPreviousRuntime,
+        "A healthy attempt after a rollback reports the rollback truthfully");
+
+    // Case 3 and case 14: the second failure cannot recurse or loop. The cap is
+    // tested before availability, so even a perfectly usable fallback is refused.
+    var cappedDecision = NativeDvRollbackPolicy.Decide(crashed, NativeDvRollbackPolicy.MaximumRollbacks, usableFallback);
+    Check(cappedDecision.Step == NativeDvNextStep.UseStablePlayback &&
+          cappedDecision.Status == NativeDvPlaybackStatus.PreviousRuntimeAlsoFailed,
+        "A second eligible failure uses stable playback and never launches a third native runtime");
+    Check(NativeDvRollbackPolicy.MaximumRollbacks == 1, "At most one automatic runtime rollback is ever attempted");
+    for (int done = NativeDvRollbackPolicy.MaximumRollbacks; done <= 5; done++)
+        Check(NativeDvRollbackPolicy.Decide(rendererFailed, done, usableFallback).Step == NativeDvNextStep.UseStablePlayback,
+            $"With {done} rollbacks already done the native lane is finished, whatever is on disk");
+
+    // Cases 4, 5 and 6: an unavailable, invalid or unreadable retained runtime all
+    // go straight to stable playback, and none of them is launched.
+    foreach (var (candidate, label) in new[]
+    {
+        (missingFallback, "missing"), (invalidFallback, "hash-invalid"),
+        (unsupportedFallbackCandidate, "adapter-unsupported"), ((NativeDvFallbackCandidate?)null, "unresolved"),
+    })
+    {
+        var decided = NativeDvRollbackPolicy.Decide(rendererFailed, 0, candidate);
+        Check(decided.Step == NativeDvNextStep.UseStablePlayback &&
+              decided.Status == NativeDvPlaybackStatus.PreviousRuntimeUnavailable,
+            $"A {label} retained runtime falls through to stable playback");
+        Check(candidate?.Runtime is null, $"A {label} retained runtime is never resolved to something launchable");
+    }
+
+    // Cases 7, 8 and 9: a media, user or normal outcome never rolls back.
+    foreach (var (verdict, label) in new[]
+    {
+        (NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: 2)), "unsupported media"),
+        (userStopped, "user cancellation"), (normalExit, "normal exit"), (shortClean, "a clean early exit"),
+        (lateFailure, "a failure after useful playback"),
+    })
+    {
+        var decided = NativeDvRollbackPolicy.Decide(verdict, 0, usableFallback);
+        Check(decided.Step == NativeDvNextStep.Finish,
+            $"{label} never triggers a rollback, even with a valid fallback retained");
+    }
+    Check(NativeDvRollbackPolicy.Decide(lateFailure, 0, usableFallback).Status == NativeDvPlaybackStatus.HealthUnknown,
+        "A failure after useful playback is not reported as a healthy runtime");
+    Check(NativeDvRollbackPolicy.Decide(notUsed, 0, null).Status == NativeDvPlaybackStatus.NotUsed,
+        "An unused native lane reports that it was not used");
+
+    // Case 11 and 12: an eligible failure never carries a composition claim with
+    // it, in either direction. The decision is about which runtime to run; what
+    // was delivered is a separate question answered by each attempt's own
+    // observation.
+    Check(!retryDecision.Explanation.Contains("Full enhancement", StringComparison.OrdinalIgnoreCase) &&
+          !cappedDecision.Explanation.Contains("Full enhancement", StringComparison.OrdinalIgnoreCase),
+        "No rollback decision ever claims a composition result");
+
+    // A full simulated sequence: B fails, A is retried, A also fails. Exactly two
+    // native launches, then stable playback, and no generation is tried twice.
+    string genB = new string('b', 64);
+    string genA = new string('a', 64);
+    var sequenceHealth = new NativeDvHealthMemory();
+    var launched = new List<string>();
+    var tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    string? currentGeneration = genB;
+    int rollbacksDone = 0;
+    NativeDvPlaybackStatus finalStatus = NativeDvPlaybackStatus.NotUsed;
+    for (int guard = 0; guard < 10; guard++)
+    {
+        launched.Add(currentGeneration!);
+        tried.Add(currentGeneration!);
+        var attemptVerdict = crashed;                      // every native attempt fails
+        sequenceHealth.Record(currentGeneration, attemptVerdict);
+        // The fallback is only offered when it has not already been tried, which
+        // is what the lifecycle's eligibility rules enforce for real.
+        var offered = !tried.Contains(genA) ? usableFallback with { GenerationId = genA } : missingFallback;
+        var step = NativeDvRollbackPolicy.Decide(attemptVerdict, rollbacksDone, offered);
+        finalStatus = step.Status;
+        if (step.Step != NativeDvNextStep.RetryOnPreviousRuntime) break;
+        rollbacksDone++;
+        currentGeneration = genA;
+    }
+    Check(launched.Count == 2 && launched[0] == genB && launched[1] == genA,
+        "A failing current runtime produces exactly two native launches: the current one, then the retained one");
+    Check(launched.Distinct(StringComparer.OrdinalIgnoreCase).Count() == launched.Count,
+        "No generation is ever launched twice in one playback, so B to A to B cannot happen");
+    Check(finalStatus == NativeDvPlaybackStatus.PreviousRuntimeAlsoFailed,
+        "When both native runtimes fail the session says so and uses stable playback");
+    Check(sequenceHealth.IsKnownUnhealthy(genA) && sequenceHealth.IsKnownUnhealthy(genB),
+        "Both failing generations are recorded for this session");
+
+    // ---------------------------------------------------------------------
+    // Rebuilding a plan for another generation.
+    // ---------------------------------------------------------------------
+    var rebuiltFacts = new NativeDvSourceFacts(7, 6, "hevc", "pq", "bt.2020", 3840, 2160);
+    var rebuiltPlan = NativeDvPlaybackPlanner.Build(
+        new DvSourceInfo(DvDetection.Detected, 7, 6,
+            new MediaInfo(Width: 3840, Height: 2160, Codec: "hevc", Transfer: "pq", Primaries: "bt.2020"),
+            DvCompatibility.Yes, DvEnhancementLayer.Unknown, DvRpuStatus.Validated, 10, "probe"),
+        pinned, @"C:\media\authored.mkv", "config", "first-pipe", true, true,
+        logPath: @"C:\logs\native-dv.log", target: new PlaybackTarget(1280, 720),
+        allowUnclassifiedEnhancementLayer: true);
+    var firstOutcome = new NativeDvLaneOutcome(true, NativeDvRuntimeState.Installed, rebuiltPlan, pinned, rebuiltFacts, null);
+
+    var rebuilt = NativeDvLane.WithRuntime(firstOutcome, pRuntime, @"C:\media\authored.mkv",
+        "config", "second-pipe", @"C:\logs\native-dv-fallback.log", new PlaybackTarget(1280, 720));
+    Check(rebuilt.Selected && rebuilt.Plan is { Supported: true }, "A selected outcome can be rebuilt against the retained runtime");
+    Check(rebuilt.Plan!.Executable == pRuntime.ExecutablePath, "The rebuilt plan launches the retained runtime");
+    Check(rebuilt.Runtime == pRuntime && rebuilt.SourceFacts == rebuiltFacts,
+        "Rebuilding reuses the container facts and changes only the runtime");
+    Check(rebuilt.Plan.Arguments.Contains(@"--log-file=C:\logs\native-dv-fallback.log") &&
+          !rebuilt.Plan.Arguments.Contains(@"--log-file=C:\logs\native-dv.log"),
+        "The retried attempt writes its own diagnostic log, so it cannot read the failed attempt's evidence");
+    Check(rebuilt.Plan.Arguments.Any(x => x.Contains("second-pipe")) &&
+          !rebuilt.Plan.Arguments.Any(x => x.Contains("first-pipe")),
+        "The retried attempt observes over its own diagnostics connection");
+    Check(rebuilt.Plan.Arguments.Contains("--cache-on-disk=no") && rebuilt.Plan.MediaScratchPaths.IsEmpty &&
+          !rebuilt.Plan.RequiresConversion,
+        "Zero media-sized scratch and no conversion survive a rollback");
+    Check(rebuilt.Plan.Arguments.Contains("--no-config") && rebuilt.Plan.Arguments.Contains("--vo=gpu-next"),
+        "The rollback keeps the proven isolated invocation");
+    int rebuiltDelimiter = rebuilt.Plan.Arguments.IndexOf("--");
+    Check(rebuiltDelimiter >= 0 && rebuilt.Plan.Arguments[rebuiltDelimiter + 1] == @"C:\media\authored.mkv" &&
+          rebuilt.Plan.Arguments.Length == rebuiltDelimiter + 2,
+        "The rollback plays the same original container, unchanged");
+    Check(!rebuilt.Plan.Arguments.Any(x => x.Contains("mkvextract", StringComparison.OrdinalIgnoreCase) ||
+        x.Contains("dovi_tool", StringComparison.OrdinalIgnoreCase) || x.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)),
+        "A rollback never reaches the Compatibility Export tools");
+
+    // A rollback is refused outright if it would mean launching the stable runtime.
+    var stableRuntime = new NativeDvRuntime(@"C:\mpv\mpv.exe", new string('c', 64), "0.41.0-1011-g182fa6ca4", 371);
+    var refusedRebuild = NativeDvLane.WithRuntime(firstOutcome, stableRuntime, @"C:\media\authored.mkv",
+        "config", "third-pipe", null, null);
+    Check(!refusedRebuild.Selected && refusedRebuild.Plan is null,
+        "A rollback can never be rebuilt onto the stable runtime");
+
+    // Only a selected outcome can be rebuilt: a refusal carries no plan to rebuild.
+    bool rejectedRebuild = false;
+    try
+    {
+        NativeDvLane.WithRuntime(NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.Installed, "not selected"),
+            pRuntime, @"C:\media\authored.mkv", "config", "pipe", null, null);
+    }
+    catch (ArgumentException) { rejectedRebuild = true; }
+    Check(rejectedRebuild, "An outcome that never selected the native lane cannot be rebuilt into a rollback");
+}
+finally { if (Directory.Exists(policyRoot)) Directory.Delete(policyRoot, true); }
+
 // ---------------------------------------------------------------------------
 // Opt-in product-path check against a real authored Profile 7 source.
 // Set ADAPTIVE_MEDIA_NATIVE_DV_SOURCE to the file to exercise real provisioning,
