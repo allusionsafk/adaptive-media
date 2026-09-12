@@ -23,6 +23,11 @@ public sealed class PlaybackService
     /// what it asked for. Null when the native lane did not run.</summary>
     public NativeDvObservation? LastNativeObservation { get; private set; }
 
+    /// <summary>Runtime lifecycle state from the most recent preparation: which
+    /// generation is current, which is retained, and whether an update or a
+    /// failure happened.</summary>
+    public NativeDvLifecycleStatus? LastNativeLifecycle { get; private set; }
+
     public static string NativeConfigDirectory => Path.Combine(SettingsStore.DirectoryPath, "native-dv-config");
     public static string NativeLogPath => Path.Combine(DiagnosticsStore.DirectoryPath, "native-dv.log");
 
@@ -86,6 +91,17 @@ public sealed class PlaybackService
             var outcome = await NativeDolbyVision.PrepareAsync(expanded[0], settings, NativeConfigDirectory,
                 nativePipe, NativeLogPath, target, new Progress<string>(x => StatusChanged?.Invoke(x)));
             LastNativeOutcome = outcome;
+            LastNativeLifecycle = NativeDolbyVision.LastStatus;
+            if (LastNativeLifecycle is not null)
+            {
+                DiagnosticsStore.Event("info", "native-dv-lifecycle",
+                    $"{LastNativeLifecycle.State}: {LastNativeLifecycle.Summary} (current={LastNativeLifecycle.CurrentGeneration ?? "none"}, " +
+                    $"previous={LastNativeLifecycle.PreviousGeneration ?? "none"}, removed={LastNativeLifecycle.GenerationsRemoved})");
+                // Ready is the ordinary case and needs no announcement; anything the
+                // user could act on does.
+                if (LastNativeLifecycle.State != NativeDvLifecycleState.Ready)
+                    StatusChanged?.Invoke(LastNativeLifecycle.Summary);
+            }
             if (outcome.Selected && outcome.Plan is { Supported: true, Request: not null })
             {
                 DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision runtime selected.");

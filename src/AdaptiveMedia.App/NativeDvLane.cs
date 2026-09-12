@@ -76,6 +76,8 @@ public static class NativeDvDiagnosticAdapters
     [
         new("7e4cb538a3f30d25920ad8e87ba6571540fb729f", "g7e4cb538a", "2026-09-10",
             "Profile 7 splitter, dual HEVC decode, [vf] [el_pair], and sh_dovi_compose_nlq confirmed against the authored source; composition signal verified to discriminate at debug level."),
+        new("14f2d48cbc7dda61adb4bd181e107a1f3f76e533", "g14f2d48cb", "2026-09-12",
+            "Re-verified against the authored source: identical diagnostic contract, and sh_dovi_compose_nlq present with the enhancement layer on and absent with it off. Retained alongside the previous entry so a rollback stays readable."),
     ];
 
     /// <summary>The adapter for the build that is actually running, or null when no

@@ -658,21 +658,50 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
     try
     {
         // First run: nothing installed. Real download, real extraction, real
-        // validation, real promotion.
+        // validation, real promotion, through the lifecycle.
         var productStore = new NativeDvRuntimeStore(Path.Combine(productRoot, "runtimes", "native-dv"));
+        var productLife = new NativeDvRuntimeLifecycle(productStore);
         Check(!productStore.Resolve(shipped).IsUsable, "PRODUCT: a fresh installation has no native runtime");
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var installed = await productStore.ProvisionAsync(shipped, allowDownload: true,
+        var firstStatus = await productLife.ReconcileAsync(shipped, allowDownload: true,
             new Progress<string>(x => Console.WriteLine("  " + x)));
         clock.Stop();
-        Check(installed.IsUsable, "PRODUCT: the runtime provisions from its pinned publisher archive");
+        Check(firstStatus.State == NativeDvLifecycleState.Ready && firstStatus.Runtime is not null,
+            "PRODUCT: the runtime provisions from its pinned publisher archive");
+        var installed = productStore.Resolve(shipped);
         Console.WriteLine($"  first provision: {clock.Elapsed.TotalSeconds:0.0}s -> {installed.Runtime!.ExecutablePath}");
+
+        // A real generation-to-generation upgrade, with real archives. The previous
+        // pinned manifest is supplied so the retained-fallback behaviour is
+        // exercised against genuine runtimes rather than fixtures.
+        string? previousManifest = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_PREVIOUS_MANIFEST");
+        if (!string.IsNullOrWhiteSpace(previousManifest) && File.Exists(previousManifest))
+        {
+            var older = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(previousManifest));
+            if (older.VersionId != shipped.VersionId)
+            {
+                string upgradeRoot = Path.Combine(productRoot, "upgrade");
+                var upgradeLife = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(upgradeRoot));
+                var installedOld = await upgradeLife.ReconcileAsync(older, allowDownload: true);
+                Check(installedOld.State == NativeDvLifecycleState.Ready, "PRODUCT: the previous pinned runtime installs");
+                var upgrade = await upgradeLife.ReconcileAsync(shipped, allowDownload: true);
+                Check(upgrade.State == NativeDvLifecycleState.Updated, "PRODUCT: moving to the new pinned runtime reports an update");
+                Check(upgrade.CurrentGeneration == shipped.VersionId, "PRODUCT: the new runtime becomes current");
+                Check(upgrade.PreviousGeneration == older.VersionId, "PRODUCT: the previous real runtime is retained as the fallback");
+                Check(Directory.Exists(Path.Combine(upgradeRoot, older.VersionId)), "PRODUCT: the retained runtime is still on disk after the upgrade");
+                Check(new NativeDvRuntimeStore(upgradeRoot).Resolve(older).IsUsable, "PRODUCT: the retained runtime still validates and could be rolled back to");
+                Console.WriteLine($"  real upgrade: {older.MpvVersion} -> {shipped.MpvVersion}, previous retained");
+                Directory.Delete(upgradeRoot, true);
+            }
+        }
         Check(NativeDvRuntimeStore.ComputeSha256(installed.Runtime.ExecutablePath) == installed.Runtime.Sha256,
             "PRODUCT: the installed executable matches its pinned hash");
 
         var fast = System.Diagnostics.Stopwatch.StartNew();
-        Check(productStore.Resolve(shipped).IsUsable, "PRODUCT: the already-installed fast path validates");
+        var repeat = await productLife.ReconcileAsync(shipped, allowDownload: true);
         fast.Stop();
+        Check(repeat.State == NativeDvLifecycleState.Ready && repeat.Runtime is not null, "PRODUCT: the already-installed fast path validates");
+        Check(repeat.GenerationsRemoved == 0, "PRODUCT: repeated reconciliation removes nothing");
         Console.WriteLine($"  already-installed revalidation: {fast.Elapsed.TotalMilliseconds:0} ms");
 
         // The bounded source probe on the authored file.
