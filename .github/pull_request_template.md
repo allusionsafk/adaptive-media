@@ -1,15 +1,19 @@
 ## Problem
 
-What concrete problem does this change address?
+<!-- What user or engineering problem does this address? -->
 
 ## Change
 
-What changed, and what was deliberately left alone?
+<!-- What changed? Note important exclusions only when they matter to review. -->
 
 ## Verification
 
-List the checks that actually ran and their results.
+<!-- List checks that actually ran and their results. -->
 
-## Notes
+## Impact
 
-Call out any remaining limitation, unverified path, release impact, security concern, or licensing change.
+<!-- Note any playback, media handling, installer, security, privacy, release, or licensing impact. Write "None" when there is none. -->
+
+## Remaining work
+
+<!-- Unverified paths, known limitations, or follow-up work. -->

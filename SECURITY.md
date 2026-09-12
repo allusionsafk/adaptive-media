@@ -1,6 +1,6 @@
 # Security policy
 
-Security and privacy reports are welcome when Adaptive Media could put a user's machine, media, or data at risk.
+Please report security or privacy problems that could put a user's machine, media, or data at risk.
 
 ## Report privately
 
@@ -12,27 +12,27 @@ Do not publish exploit details, credentials, private media, personal paths, toke
 
 ## In scope
 
-Useful reports include:
+Examples include:
 
 - unsafe file handling or command construction
 - unintended modification or deletion of source media
-- privilege or installer behaviour that exceeds the documented boundary
+- installer or privilege behaviour that exceeds documented expectations
 - dependency or update paths that execute unverified content
-- local service exposure outside the intended boundary
-- diagnostic or log output that leaks private media paths or content
+- local service exposure outside the intended network scope
+- diagnostics or logs that leak private media paths or content
 - release integrity problems
 
 ## What to include
 
-Provide the smallest reproducible report you can:
+Please provide:
 
 1. commit or build tested
 2. Windows version
-3. only the hardware details relevant to the issue
+3. only hardware details relevant to the issue
 4. exact reproduction steps
 5. expected behaviour
 6. observed behaviour
 7. likely impact
 8. a sanitised log excerpt when necessary
 
-For non-security playback and compatibility problems, use [SUPPORT.md](SUPPORT.md).
+For ordinary playback and compatibility problems, use [SUPPORT.md](SUPPORT.md).
