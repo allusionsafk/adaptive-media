@@ -1357,4 +1357,350 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
     Console.WriteLine("Native Dolby Vision product path: PASS");
 }
 
+
+
+// ---------------------------------------------------------------------------
+// The healthy case, through the real application path.
+//
+// Both pinned runtimes have already been certified against the authored source,
+// so this is deliberately short. What it adds is the one thing the health work
+// could plausibly have broken: that an ordinary, working preferred runtime still
+// plays and still reports full enhancement-layer composition, with no rollback,
+// no fallback even consulted, and no extra launch.
+// ---------------------------------------------------------------------------
+if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
+{
+    Console.WriteLine("Native Dolby Vision healthy path: exercising the preferred runtime.");
+    string shippedManifestPath = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_MANIFEST")
+        ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "native-dv-p7", "runtime-manifest.json");
+    var shippedPreferred = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(shippedManifestPath));
+
+    string healthyRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-healthy-" + Guid.NewGuid().ToString("N"));
+    string? dataDirBefore = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR");
+    var healthyStableBefore = File.Exists(@"C:\mpv\mpv.exe")
+        ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+        : (Length: 0L, Hash: "absent");
+    var healthySourceBefore = new FileInfo(realSource);
+    (long Length, DateTime Written) healthySourceIdentity = (healthySourceBefore.Length, healthySourceBefore.LastWriteTimeUtc);
+
+    try
+    {
+        Directory.CreateDirectory(healthyRoot);
+        Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", healthyRoot);
+
+        var healthyStore = new NativeDvRuntimeStore(Path.Combine(healthyRoot, "runtimes", "native-dv"));
+        var healthyService = new PlaybackService
+        {
+            NativeDolbyVision = new NativeDvLane(healthyStore, shippedPreferred),
+        };
+        var healthyStatus = new List<string>();
+        healthyService.StatusChanged += x => { lock (healthyStatus) healthyStatus.Add(x); };
+
+        var healthyPlan = await healthyService.PrepareAsync([realSource],
+            new PlaybackOptions("Reference", "Off", "Off", false, false),
+            new SystemSummary { MpvPath = @"C:\mpv\mpv.exe" },
+            new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = true },
+            new PlaybackTarget(1280, 720));
+
+        Check(healthyPlan.Renderer == "Native Dolby Vision gpu-next", "HEALTHY: the preferred runtime is selected for the authored source");
+        Check(healthyService.LastNativeLifecycle?.CurrentGeneration == shippedPreferred.VersionId,
+            "HEALTHY: the shipped generation is the current one");
+        Check(healthyPlan.Executable == Path.Combine(healthyStore.RootPath, shippedPreferred.VersionId, shippedPreferred.LauncherRelativePath),
+            "HEALTHY: the plan launches the preferred generation");
+
+        int healthyExit = await healthyService.LaunchAsync(healthyPlan, stopAfterSeconds: 12);
+
+        Console.WriteLine($"  runtime: {shippedPreferred.MpvVersion}");
+        Console.WriteLine($"  health: {healthyService.LastNativeHealth?.Health} status={healthyService.LastNativePlaybackStatus} exit={healthyExit}");
+        Console.WriteLine($"  observed: delivered={healthyService.LastNativeObservation?.Delivered} " +
+            $"composition={healthyService.LastNativeObservation?.FelComposition} " +
+            $"pairing={healthyService.LastNativeObservation?.BlElPairing} " +
+            $"decoders={healthyService.LastNativeObservation?.DecoderInstances} " +
+            $"surfaces={healthyService.LastNativeObservation?.HardwareSurfaces}");
+
+        Check(healthyService.LastNativeHealth is { Health: NativeDvHealth.Healthy, ReachedUsefulPlayback: true },
+            "HEALTHY: the preferred runtime reached useful playback");
+        Check(healthyService.LastNativePlaybackStatus == NativeDvPlaybackStatus.RuntimeHealthy,
+            "HEALTHY: the session reports the native runtime as healthy");
+        Check(healthyService.LastNativeFallback is null,
+            "HEALTHY: a working runtime never even consults the retained fallback");
+        Check(!healthyService.NativeHealth.IsKnownUnhealthy(shippedPreferred.VersionId),
+            "HEALTHY: a working generation records no fault");
+
+        // Exactly one native launch, and no stable-path relaunch.
+        Check(healthyService.LastReport!.Attempts.Count == 1,
+            "HEALTHY: exactly one playback attempt is made, with no unexpected fallback");
+        Check(healthyService.LastReport.Attempts[0].Renderer == "Native Dolby Vision gpu-next",
+            "HEALTHY: the one attempt is the native one");
+        Check(!healthyStatus.Any(x => x.Contains("previous native runtime", StringComparison.OrdinalIgnoreCase) ||
+            x.Contains("stable playback", StringComparison.OrdinalIgnoreCase)),
+            "HEALTHY: nothing claims a rollback or a stable fallback happened");
+
+        // Full FEL, observed from this attempt's own evidence.
+        Check(healthyService.LastNativeObservation is not null, "HEALTHY: the runtime's observation was established");
+        Check(healthyService.LastNativeObservation!.Delivered == NativeDvDelivered.FullEnhancementLayer,
+            "HEALTHY: the preferred runtime still delivers observed full enhancement-layer composition");
+        Check(healthyService.LastNativeObservation.FelComposition == DvObservedState.Active &&
+              healthyService.LastNativeObservation.BlElPairing == DvObservedState.Active &&
+              healthyService.LastNativeObservation.DecoderInstances >= 2 &&
+              healthyService.LastNativeObservation.HardwareSurfaces == DvObservedState.Active,
+            "HEALTHY: composition, pairing, dual decode and hardware surfaces are all observed");
+        Check(!healthyService.LastNativeObservation.HasDegradation, "HEALTHY: the session reports no degradation");
+        Check(!File.Exists(PlaybackService.NativeFallbackLogPath),
+            "HEALTHY: no rollback log is written when no rollback happens");
+
+        // Zero media-sized scratch outside the runtime store itself.
+        long healthyBiggest = Directory.EnumerateFiles(healthyRoot, "*", SearchOption.AllDirectories)
+            .Where(x => !x.Contains(Path.Combine("runtimes", "native-dv"), StringComparison.OrdinalIgnoreCase))
+            .Select(x => new FileInfo(x).Length).DefaultIfEmpty(0).Max();
+        Console.WriteLine($"  largest non-runtime file written: {healthyBiggest} bytes");
+        Check(healthyBiggest < 64L * 1024 * 1024, "HEALTHY: playback writes no media-sized scratch");
+        Check(!Directory.EnumerateFiles(healthyRoot, "*.mkv", SearchOption.AllDirectories).Any() &&
+              !Directory.EnumerateFiles(healthyRoot, "*.hevc", SearchOption.AllDirectories).Any(),
+            "HEALTHY: playback extracts and converts nothing");
+
+        var healthyStableAfter = File.Exists(@"C:\mpv\mpv.exe")
+            ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+            : (Length: 0L, Hash: "absent");
+        Check(healthyStableBefore.Length == healthyStableAfter.Length && healthyStableBefore.Hash == healthyStableAfter.Hash,
+            "HEALTHY: the stable runtime is untouched");
+        var healthySourceAfter = new FileInfo(realSource);
+        Check(healthySourceAfter.Length == healthySourceIdentity.Length &&
+              healthySourceAfter.LastWriteTimeUtc == healthySourceIdentity.Written,
+            "HEALTHY: the authored source is unchanged");
+        Console.WriteLine("Native Dolby Vision healthy path: PASS");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", dataDirBefore);
+        try { if (Directory.Exists(healthyRoot)) Directory.Delete(healthyRoot, true); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Controlled real failure injection through the real application path.
+//
+// Everything above reasons about health and rollback in isolation. This runs the
+// product's own PrepareAsync and LaunchAsync against the authored Profile 7
+// source, with a current generation that verifies and probes correctly and then
+// fails at launch, and proves the lane retries on the retained real runtime and
+// plays.
+//
+// The injection is a generation whose launcher is replaced after it has been
+// verified and used for the probe, which is the shape of a real failure: a
+// runtime quarantined by security software, or left half-written by an
+// interrupted update, is intact when it is checked and broken when it is run.
+// Nothing outside the isolated store is touched: the stable runtime is only ever
+// read, and the authored source is only ever played.
+// ---------------------------------------------------------------------------
+if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
+{
+    Console.WriteLine("Native Dolby Vision rollback: injecting a real current-runtime failure.");
+    string previousManifestPath = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_PREVIOUS_MANIFEST") ?? "";
+    string cachedRuntimeRoot = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_NATIVE_DV_RUNTIME_CACHE") ?? "";
+    if (string.IsNullOrWhiteSpace(previousManifestPath) || !File.Exists(previousManifestPath) ||
+        string.IsNullOrWhiteSpace(cachedRuntimeRoot) || !Directory.Exists(cachedRuntimeRoot))
+    {
+        Console.WriteLine("  skipped: set ADAPTIVE_MEDIA_NATIVE_DV_PREVIOUS_MANIFEST and ADAPTIVE_MEDIA_NATIVE_DV_RUNTIME_CACHE.");
+    }
+    else
+    {
+        var retained = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(previousManifestPath));
+        string cachedArchive = Directory.EnumerateFiles(cachedRuntimeRoot, "*.7z").Single();
+        string cachedTree = Path.Combine(cachedRuntimeRoot, "extracted");
+        Check(NativeDvRuntimeStore.ComputeSha256(cachedArchive) == retained.ArchiveSha256,
+            "ROLLBACK: the cached archive is the one the retained manifest pins");
+
+        string injectionRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-rollback-" + Guid.NewGuid().ToString("N"));
+        string? previousDataDir = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR");
+        var stableBefore = File.Exists(@"C:\mpv\mpv.exe")
+            ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+            : (Length: 0L, Hash: "absent");
+        var sourceBefore = new FileInfo(realSource);
+        (long Length, DateTime Written) sourceIdentityBefore = (sourceBefore.Length, sourceBefore.LastWriteTimeUtc);
+
+        try
+        {
+            // Every path the product derives from its data directory is redirected
+            // into the isolated root, so the real user profile is untouched.
+            Directory.CreateDirectory(injectionRoot);
+            Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", injectionRoot);
+            Check(SettingsStore.DirectoryPath == Path.GetFullPath(injectionRoot),
+                "ROLLBACK: the product writes into the isolated root for this test");
+
+            string storeRoot = Path.Combine(injectionRoot, "runtimes", "native-dv");
+
+            // The retained generation is provisioned from the locally cached
+            // publisher archive: a real runtime, verified by its real pinned
+            // hashes, without going back to the network.
+            NativeDvArchiveFetch fetchRetained = (uri, destination, token) =>
+            {
+                File.Copy(cachedArchive, destination, overwrite: true);
+                return Task.CompletedTask;
+            };
+            NativeDvArchiveExtract extractRetained = (archive, destination, token) =>
+            {
+                foreach (var component in retained.Components)
+                    File.Copy(Path.Combine(cachedTree, component.RelativePath),
+                        Path.Combine(destination, component.RelativePath), overwrite: true);
+                return Task.CompletedTask;
+            };
+
+            var store = new NativeDvRuntimeStore(storeRoot, fetchRetained, extractRetained);
+            var lifecycle = new NativeDvRuntimeLifecycle(store);
+            var installedRetained = await lifecycle.ReconcileAsync(retained, allowDownload: true);
+            Check(installedRetained.State == NativeDvLifecycleState.Ready && installedRetained.Runtime is not null,
+                "ROLLBACK: the retained real runtime installs and verifies");
+            Check(store.ReadDescriptorSnapshot(retained.VersionId) is not null,
+                "ROLLBACK: the retained generation records its own pinned manifest");
+
+            // The generation that will fail. Its components are a real working mpv,
+            // so it verifies by hash and probes the source correctly, and its
+            // manifest names a commit this build has a verified adapter for, so the
+            // lifecycle admits it. Its identity differs because its archive does.
+            byte[] injectedArchive = System.Text.Encoding.UTF8.GetBytes("injected-current-generation-archive-payload");
+            var retainedLauncher = retained.Components.First(x => x.RelativePath == retained.LauncherRelativePath);
+            var injectedCompanion = retained.Components.FirstOrDefault(x => x.RelativePath != retained.LauncherRelativePath);
+            string ManifestEntry(string name, NativeDvRuntimeComponent component) =>
+                "\"" + name + "\": { \"pathRelativeToManifest\": \"./extracted/" +
+                component.RelativePath.Replace(Path.DirectorySeparatorChar, '/') + "\", \"bytes\": " +
+                component.Bytes + ", \"sha256\": \"" + component.Sha256 + "\" }";
+            string injectedRuntimeEntries = ManifestEntry("executable", retainedLauncher) +
+                (injectedCompanion is null ? "" : "," + ManifestEntry("consoleLauncher", injectedCompanion));
+            string injectedManifest =
+                "{ \"schemaVersion\": 1," +
+                "  \"provider\": { \"name\": \"injected\", \"releaseUrl\": \"https://example.invalid/injected\" }," +
+                "  \"archive\": { \"url\": \"https://example.invalid/injected.7z\", \"bytes\": " + injectedArchive.Length +
+                ", \"sha256\": \"" + Sha256Of(injectedArchive) + "\" }," +
+                "  \"runtime\": { " + injectedRuntimeEntries + " }," +
+                "  \"mpv\": { \"version\": \"" + retained.MpvVersion + "\", \"commit\": \"" + retained.MpvCommit + "\" }," +
+                "  \"libplacebo\": { \"apiVersion\": " + retained.LibplaceboApi + " } }";
+            var injected = NativeDvRuntimeDescriptor.FromManifestJson(injectedManifest);
+            Check(injected.VersionId != retained.VersionId, "ROLLBACK: the injected generation is a different generation");
+
+            var injectingStore = new NativeDvRuntimeStore(storeRoot,
+                (uri, destination, token) => { File.WriteAllBytes(destination, injectedArchive); return Task.CompletedTask; },
+                extractRetained);
+            var injectingLifecycle = new NativeDvRuntimeLifecycle(injectingStore);
+            var installedInjected = await injectingLifecycle.ReconcileAsync(injected, allowDownload: true);
+            Check(installedInjected.State == NativeDvLifecycleState.Updated, "ROLLBACK: the injected generation becomes current");
+            Check(installedInjected.CurrentGeneration == injected.VersionId &&
+                  installedInjected.PreviousGeneration == retained.VersionId,
+                "ROLLBACK: the real runtime is retained as the previous generation");
+
+            // The product, with its real lane over the real store.
+            var service = new PlaybackService
+            {
+                NativeDolbyVision = new NativeDvLane(injectingStore, injected),
+            };
+            var statusLines = new List<string>();
+            service.StatusChanged += x => { lock (statusLines) statusLines.Add(x); };
+
+            var settings = new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = true };
+            var system = new SystemSummary { MpvPath = @"C:\mpv\mpv.exe" };
+            var plan = await service.PrepareAsync([realSource], new PlaybackOptions("Reference", "Off", "Off", false, false), system, settings,
+                new PlaybackTarget(1280, 720));
+            Check(plan.Renderer == "Native Dolby Vision gpu-next",
+                "ROLLBACK: the product selects the native lane for the authored source");
+            Check(plan.Executable == Path.Combine(storeRoot, injected.VersionId, injected.LauncherRelativePath),
+                "ROLLBACK: the product plans to launch the current generation");
+            Check(service.LastNativeOutcome is { Selected: true }, "ROLLBACK: the lane probed the real source and selected it");
+
+            // The injection. The generation verified and probed correctly above;
+            // now its launcher stops being a runnable image, exactly as it would
+            // after a quarantine or a half-written update.
+            string injectedLauncher = plan.Executable;
+            long injectedLauncherBytes = new FileInfo(injectedLauncher).Length;
+            File.WriteAllText(injectedLauncher, "this is not a runnable image");
+            Check(new FileInfo(injectedLauncher).Length != injectedLauncherBytes,
+                "ROLLBACK: the current generation's launcher is now broken");
+
+            int exit = await service.LaunchAsync(plan, stopAfterSeconds: 12);
+
+            Console.WriteLine($"  health: {service.LastNativeHealth?.Health} status={service.LastNativePlaybackStatus} exit={exit}");
+            Console.WriteLine($"  fallback: {service.LastNativeFallback?.State} generation={service.LastNativeFallback?.GenerationId}");
+            Console.WriteLine($"  observed: delivered={service.LastNativeObservation?.Delivered} " +
+                $"composition={service.LastNativeObservation?.FelComposition} decoders={service.LastNativeObservation?.DecoderInstances}");
+            foreach (string line in statusLines) Console.WriteLine("    status: " + line);
+
+            // The failure was classified as the runtime's, and the rollback happened.
+            Check(service.LastNativeFallback is { State: NativeDvFallbackState.Available },
+                "ROLLBACK: the retained real runtime was found eligible");
+            Check(service.LastNativeFallback!.GenerationId == retained.VersionId,
+                "ROLLBACK: the fallback is the retained real generation");
+            Check(service.LastNativePlaybackStatus == NativeDvPlaybackStatus.RolledBackToPreviousRuntime,
+                "ROLLBACK: the session reports that the previous native runtime was used");
+            Check(service.LastNativeHealth is { Health: NativeDvHealth.Healthy },
+                "ROLLBACK: the retained runtime started useful playback");
+            Check(service.NativeHealth.IsKnownUnhealthy(injected.VersionId),
+                "ROLLBACK: the generation that failed is recorded unhealthy for this session");
+            Check(!service.NativeHealth.IsKnownUnhealthy(retained.VersionId),
+                "ROLLBACK: the runtime that worked is not recorded unhealthy");
+
+            // Exactly two native launches: the broken current one, then the retained
+            // one. No third native attempt, and no return to the broken generation.
+            var nativeAttempts = service.LastReport!.Attempts
+                .Where(x => x.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal)).ToList();
+            Check(nativeAttempts.Count == 2, "ROLLBACK: exactly two native attempts were made");
+            Check(nativeAttempts[0].Executable == injectedLauncher, "ROLLBACK: the first attempt used the current generation");
+            Check(nativeAttempts[1].Executable == Path.Combine(storeRoot, retained.VersionId, retained.LauncherRelativePath),
+                "ROLLBACK: the second attempt used the retained real generation");
+            Check(!nativeAttempts[1].Executable.StartsWith(@"C:\mpv\", StringComparison.OrdinalIgnoreCase),
+                "ROLLBACK: the fallback is never the stable runtime");
+            Check(nativeAttempts.Select(x => x.Executable).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 2,
+                "ROLLBACK: no generation was launched twice");
+
+            // What the retained runtime delivered was established from its own
+            // evidence. This is the truthfulness boundary: the observation belongs
+            // to the attempt that ran, and a rollback is never itself a composition
+            // claim.
+            Check(service.LastNativeObservation is not null,
+                "ROLLBACK: the retained runtime's own observation was established");
+            Check(service.LastNativeObservation!.Delivered == NativeDvDelivered.FullEnhancementLayer,
+                "ROLLBACK: the retained runtime is observed composing the enhancement layer, not assumed to");
+            Check(service.LastNativeObservation.FelComposition == DvObservedState.Active &&
+                  service.LastNativeObservation.DecoderInstances >= 2,
+                "ROLLBACK: composition and dual decode are observed on the attempt that actually ran");
+            Check(File.Exists(PlaybackService.NativeFallbackLogPath),
+                "ROLLBACK: the retried attempt wrote its own diagnostic log");
+            Check(statusLines.Any(x => x.Contains("previous native runtime", StringComparison.OrdinalIgnoreCase)),
+                "ROLLBACK: the user is told the previous runtime was used");
+            Check(!statusLines.Any(x => x.Contains("Native runtime healthy", StringComparison.Ordinal)),
+                "ROLLBACK: a rollback is never reported as an ordinary healthy run");
+
+            // The active generation survived, and nothing media-sized was written.
+            Check(Directory.Exists(Path.Combine(storeRoot, retained.VersionId)) &&
+                  store.Resolve(retained).IsUsable,
+                "ROLLBACK: the generation that played is intact and still validates");
+            long biggest = Directory.EnumerateFiles(injectionRoot, "*", SearchOption.AllDirectories)
+                .Where(x => !x.Contains(Path.Combine("runtimes", "native-dv"), StringComparison.OrdinalIgnoreCase))
+                .Select(x => new FileInfo(x).Length).DefaultIfEmpty(0).Max();
+            Console.WriteLine($"  largest non-runtime file written: {biggest} bytes");
+            Check(biggest < 64L * 1024 * 1024, "ROLLBACK: a rollback writes no media-sized scratch");
+            Check(!Directory.EnumerateFiles(injectionRoot, "*.mkv", SearchOption.AllDirectories).Any() &&
+                  !Directory.EnumerateFiles(injectionRoot, "*.hevc", SearchOption.AllDirectories).Any(),
+                "ROLLBACK: a rollback extracts and converts nothing");
+
+            var stableAfter = File.Exists(@"C:\mpv\mpv.exe")
+                ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))
+                : (Length: 0L, Hash: "absent");
+            Check(stableBefore.Length == stableAfter.Length && stableBefore.Hash == stableAfter.Hash,
+                "ROLLBACK: the stable runtime is untouched by the failure and the rollback");
+            var sourceAfter = new FileInfo(realSource);
+            Check(sourceAfter.Length == sourceIdentityBefore.Length && sourceAfter.LastWriteTimeUtc == sourceIdentityBefore.Written,
+                "ROLLBACK: the authored source is unchanged in length and last-write time");
+            Console.WriteLine("Native Dolby Vision rollback: PASS");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", previousDataDir);
+            try { if (Directory.Exists(injectionRoot)) Directory.Delete(injectionRoot, true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+}
+
 Console.WriteLine($"PASS: {checks} total Dolby Vision assertions");

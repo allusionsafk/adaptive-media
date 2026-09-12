@@ -12,5 +12,12 @@
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />
+    <!-- The real orchestration, so the rollback path can be exercised end to end
+         rather than re-implemented in the test. None of these touch WPF. -->
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackService.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/SessionDiagnostics.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/HdrSession.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/NativeDisplay.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/MonitorInventory.cs" />
   </ItemGroup>
 </Project>

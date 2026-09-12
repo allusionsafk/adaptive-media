@@ -54,6 +54,11 @@ public static class NativeDvSourceProbe
         }
         catch (TimeoutException) { return NativeDvSourceFacts.Unknown; }
         catch (IOException) { return NativeDvSourceFacts.Unknown; }
+        // A runtime that cannot be started at all reports no facts. Letting this
+        // escape would turn a broken runtime into an unhandled error on the way to
+        // opening a file, instead of a source the native lane simply declines.
+        catch (System.ComponentModel.Win32Exception) { return NativeDvSourceFacts.Unknown; }
+        catch (UnauthorizedAccessException) { return NativeDvSourceFacts.Unknown; }
     }
 }
 
