@@ -357,9 +357,213 @@ try
 finally { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); }
 
 // ---------------------------------------------------------------------------
+// Runtime lifecycle: generations, retention, garbage collection, concurrency.
+// A failed or unsupported update must never cost the working runtime.
+// ---------------------------------------------------------------------------
+string lifeRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-lifecycle-" + Guid.NewGuid().ToString("N"));
+try
+{
+    // Two real generations, differing only in content, so the ids differ.
+    (NativeDvRuntimeDescriptor Descriptor, byte[] Archive, byte[] Exe, byte[] Com) Generation(string label, string commit)
+    {
+        byte[] exe = System.Text.Encoding.UTF8.GetBytes("mpv-executable-" + label);
+        byte[] com = System.Text.Encoding.UTF8.GetBytes("mpv-launcher-" + label);
+        byte[] archive = System.Text.Encoding.UTF8.GetBytes("archive-payload-" + label);
+        string json = $$"""
+        {
+          "schemaVersion": 1,
+          "provider": { "name": "test", "releaseUrl": "https://example.invalid/r" },
+          "archive": { "url": "https://example.invalid/{{label}}.7z", "bytes": {{archive.Length}}, "sha256": "{{Sha256Of(archive)}}" },
+          "runtime": {
+            "executable": { "pathRelativeToManifest": "../x/extracted/mpv.exe", "bytes": {{exe.Length}}, "sha256": "{{Sha256Of(exe)}}" },
+            "consoleLauncher": { "pathRelativeToManifest": "../x/extracted/mpv.com", "bytes": {{com.Length}}, "sha256": "{{Sha256Of(com)}}" }
+          },
+          "mpv": { "version": "0.41.0-test-{{label}}", "commit": "{{commit}}" },
+          "libplacebo": { "apiVersion": 371 }
+        }
+        """;
+        return (NativeDvRuntimeDescriptor.FromManifestJson(json), archive, exe, com);
+    }
+
+    // Both generations claim the one commit whose adapter is verified, because the
+    // support gate is exercised separately below.
+    string verified = NativeDvDiagnosticAdapters.Supported[0].MpvCommit;
+    var genA = Generation("alpha", verified);
+    var genB = Generation("beta", verified);
+    Check(genA.Descriptor.VersionId != genB.Descriptor.VersionId, "Different content is a different generation");
+
+    int downloads = 0;
+    NativeDvArchiveFetch FetchFor(params (NativeDvRuntimeDescriptor D, byte[] A)[] known) => (uri, destination, token) =>
+    {
+        downloads++;
+        foreach (var k in known)
+            if (uri.AbsoluteUri.Contains(k.D.ArchiveUrl.Segments[^1])) { File.WriteAllBytes(destination, k.A); return Task.CompletedTask; }
+        throw new IOException("no archive for " + uri);
+    };
+    NativeDvArchiveExtract ExtractFor(params (NativeDvRuntimeDescriptor D, byte[] E, byte[] C)[] known) => (archive, destination, token) =>
+    {
+        byte[] bytes = File.ReadAllBytes(archive);
+        foreach (var k in known)
+            if (Sha256Of(bytes) == k.D.ArchiveSha256)
+            {
+                File.WriteAllBytes(Path.Combine(destination, "mpv.exe"), k.E);
+                File.WriteAllBytes(Path.Combine(destination, "mpv.com"), k.C);
+                return Task.CompletedTask;
+            }
+        throw new IOException("unknown archive");
+    };
+
+    string root = Path.Combine(lifeRoot, "store");
+    var store = new NativeDvRuntimeStore(root,
+        FetchFor((genA.Descriptor, genA.Archive), (genB.Descriptor, genB.Archive)),
+        ExtractFor((genA.Descriptor, genA.Exe, genA.Com), (genB.Descriptor, genB.Exe, genB.Com)));
+    var life = new NativeDvRuntimeLifecycle(store);
+
+    // Generation id discipline: only an archive hash is ever treated as one.
+    Check(NativeDvRuntimeLifecycle.IsGenerationId(genA.Descriptor.VersionId), "An archive hash is a generation id");
+    foreach (string bad in new[] { "..", "../../evil", "short", new string('z', 64), "", "  " })
+        Check(!NativeDvRuntimeLifecycle.IsGenerationId(bad), $"'{bad}' is not a generation id");
+
+    // First install.
+    var first = await life.ReconcileAsync(genA.Descriptor, allowDownload: true);
+    Check(first.State == NativeDvLifecycleState.Ready && first.Runtime is not null, "The first generation installs and becomes current");
+    Check(first.CurrentGeneration == genA.Descriptor.VersionId && first.PreviousGeneration is null, "There is no previous generation yet");
+    Check(downloads == 1, "The first install downloads once");
+
+    // Idempotence: reconciling again changes nothing and downloads nothing.
+    var again = await life.ReconcileAsync(genA.Descriptor, allowDownload: true);
+    Check(again.State == NativeDvLifecycleState.Ready && downloads == 1, "Reconciling an already-current generation downloads nothing");
+    Check(again.GenerationsRemoved == 0, "Repeated reconciliation removes nothing");
+    Check(life.ReadState().Current == genA.Descriptor.VersionId, "Repeated reconciliation does not drift the recorded state");
+
+    // Upgrade A -> B. A must survive as the retained fallback.
+    var upgraded = await life.ReconcileAsync(genB.Descriptor, allowDownload: true);
+    Check(upgraded.State == NativeDvLifecycleState.Updated, "Moving to a new generation reports an update");
+    Check(upgraded.CurrentGeneration == genB.Descriptor.VersionId, "The new generation becomes current");
+    Check(upgraded.PreviousGeneration == genA.Descriptor.VersionId, "The outgoing generation is retained as previous");
+    Check(Directory.Exists(Path.Combine(root, genA.Descriptor.VersionId)), "The previous generation is still on disk");
+    Check(store.Resolve(genA.Descriptor).IsUsable, "The retained previous generation still validates");
+
+    // A corrupt candidate must not cost the working runtime.
+    var genC = Generation("gamma", verified);
+    var corruptStore = new NativeDvRuntimeStore(root,
+        FetchFor((genC.Descriptor, genC.Archive)),
+        (archive, destination, token) =>
+        {
+            File.WriteAllBytes(Path.Combine(destination, "mpv.exe"), System.Text.Encoding.UTF8.GetBytes(new string('x', genC.Exe.Length)));
+            File.WriteAllBytes(Path.Combine(destination, "mpv.com"), genC.Com);
+            return Task.CompletedTask;
+        });
+    var corruptLife = new NativeDvRuntimeLifecycle(corruptStore);
+    var failedUpdate = await corruptLife.ReconcileAsync(genC.Descriptor, allowDownload: true);
+    Check(failedUpdate.State == NativeDvLifecycleState.UpdateFailedPreviousRetained, "A corrupt candidate reports a failed update with the previous runtime retained");
+    Check(failedUpdate.Runtime is null, "A failed update yields no runtime");
+    Check(!Directory.Exists(Path.Combine(root, genC.Descriptor.VersionId)), "A corrupt candidate is never promoted");
+    Check(corruptLife.ReadState().Current == genB.Descriptor.VersionId, "A failed update does not change which generation is current");
+    Check(store.Resolve(genB.Descriptor).IsUsable, "The working generation still works after a failed update");
+    Check(store.Resolve(genA.Descriptor).IsUsable, "The retained fallback survives a failed update too");
+
+    // A cancelled candidate must behave the same way.
+    using var cancelSource = new CancellationTokenSource();
+    var cancelStore = new NativeDvRuntimeStore(root,
+        (uri, destination, token) => { cancelSource.Cancel(); File.WriteAllBytes(destination, genC.Archive); return Task.CompletedTask; },
+        ExtractFor((genC.Descriptor, genC.Exe, genC.Com)));
+    var cancelled = await new NativeDvRuntimeLifecycle(cancelStore).ReconcileAsync(genC.Descriptor, true, null, cancelSource.Token);
+    Check(cancelled.Runtime is null && cancelled.CurrentGeneration == genB.Descriptor.VersionId, "A cancelled update leaves the current generation in place");
+    Check(store.Resolve(genB.Descriptor).IsUsable, "The working generation survives a cancelled update");
+
+    // An unsupported runtime is refused before anything is downloaded.
+    var unsupported = Generation("delta", "0000000000000000000000000000000000000000");
+    int downloadsBefore = downloads;
+    var unsupportedResult = await life.ReconcileAsync(unsupported.Descriptor, allowDownload: true);
+    Check(unsupportedResult.State == NativeDvLifecycleState.UnsupportedRuntime, "A runtime with no verified adapter is refused");
+    Check(unsupportedResult.Runtime is null, "An unsupported runtime never yields a usable runtime");
+    Check(downloads == downloadsBefore, "An unsupported runtime is never downloaded");
+    Check(!Directory.Exists(Path.Combine(root, unsupported.Descriptor.VersionId)), "An unsupported runtime is never installed");
+    Check(life.ReadState().Current == genB.Descriptor.VersionId, "Refusing an unsupported runtime does not disturb the current generation");
+
+    // Garbage collection: only genuinely superseded generations go.
+    string orphanGeneration = Path.Combine(root, new string('a', 64));
+    Directory.CreateDirectory(orphanGeneration);
+    File.WriteAllText(Path.Combine(orphanGeneration, "mpv.exe"), "superseded");
+    string notAGeneration = Path.Combine(root, "not-a-generation");
+    Directory.CreateDirectory(notAGeneration);
+    File.WriteAllText(Path.Combine(notAGeneration, "keep.txt"), "unrelated");
+    int collected = life.CollectGarbage(genB.Descriptor);
+    Check(collected == 1, "Garbage collection removes the superseded generation");
+    Check(!Directory.Exists(orphanGeneration), "The superseded generation is gone");
+    Check(Directory.Exists(Path.Combine(root, genB.Descriptor.VersionId)), "Garbage collection never removes the current generation");
+    Check(Directory.Exists(Path.Combine(root, genA.Descriptor.VersionId)), "Garbage collection never removes the retained previous generation");
+    Check(Directory.Exists(notAGeneration), "Garbage collection only considers directories named like a generation");
+    Check(life.CollectGarbage(genB.Descriptor) == 0, "Garbage collection is idempotent");
+
+    // A hostile state file must not be able to name something to delete.
+    File.WriteAllText(life.StatePath, "{\"Current\":\"../../../Windows\",\"Previous\":\"..\\\\..\\\\escape\"}");
+    var sanitised = life.ReadState();
+    Check(sanitised.Current is null && sanitised.Previous is null, "A state file naming a path instead of a generation is ignored");
+    File.WriteAllText(life.StatePath, "{ not json");
+    Check(life.ReadState().Current is null, "A corrupt state file reads as empty rather than throwing");
+    // Restore a truthful state for the remaining checks.
+    await life.ReconcileAsync(genB.Descriptor, allowDownload: true);
+    Check(life.ReadState().Current == genB.Descriptor.VersionId, "Reconciliation repairs a damaged state file");
+
+    // Crash/restart: a brand new lifecycle over the same root converges without work.
+    int beforeRestart = downloads;
+    var restarted = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(root,
+        FetchFor((genB.Descriptor, genB.Archive)), ExtractFor((genB.Descriptor, genB.Exe, genB.Com))));
+    var afterRestart = await restarted.ReconcileAsync(genB.Descriptor, allowDownload: true);
+    Check(afterRestart.State == NativeDvLifecycleState.Ready && downloads == beforeRestart, "A restarted process reuses the installed generation without downloading");
+
+    // Concurrency: real OS-level exclusion, not a simulation. Two reconcilers over
+    // the same root race for the lock; exactly one may install.
+    string raceRoot = Path.Combine(lifeRoot, "race");
+    int raceDownloads = 0;
+    NativeDvArchiveFetch slowFetch = async (uri, destination, token) =>
+    {
+        Interlocked.Increment(ref raceDownloads);
+        await Task.Delay(250, token);
+        File.WriteAllBytes(destination, genA.Archive);
+    };
+    var raceA = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(raceRoot, slowFetch, ExtractFor((genA.Descriptor, genA.Exe, genA.Com))));
+    var raceB = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(raceRoot, slowFetch, ExtractFor((genA.Descriptor, genA.Exe, genA.Com))));
+    var results = await Task.WhenAll(
+        raceA.ReconcileAsync(genA.Descriptor, allowDownload: true),
+        raceB.ReconcileAsync(genA.Descriptor, allowDownload: true));
+    Check(raceDownloads == 1, "Two concurrent reconcilers download the runtime once between them");
+    Check(results.Count(x => x.Runtime is not null) >= 1, "At least one concurrent reconciler ends with a usable runtime");
+    Check(results.All(x => x.State is NativeDvLifecycleState.Ready or NativeDvLifecycleState.Busy), "A reconciler that loses the race reports busy rather than racing");
+    Check(!results.Any(x => x.Runtime is not null && !File.Exists(x.Runtime.ExecutablePath)), "No concurrent reconciler returns an unverified runtime");
+
+    // Cross-process: a separate process holding the lock must be respected.
+    string lockRoot = Path.Combine(lifeRoot, "crossprocess");
+    Directory.CreateDirectory(lockRoot);
+    var holderLife = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(lockRoot,
+        FetchFor((genA.Descriptor, genA.Archive)), ExtractFor((genA.Descriptor, genA.Exe, genA.Com))));
+    string lockFile = Path.Combine(lockRoot, NativeDvRuntimeLifecycle.LockFileName);
+    var holder = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("powershell",
+        $"-NoProfile -Command \"$f=[IO.File]::Open('{lockFile}','OpenOrCreate','ReadWrite','None'); Start-Sleep -Seconds 6; $f.Dispose()\"")
+    { UseShellExecute = false, CreateNoWindow = true });
+    try
+    {
+        await Task.Delay(1500);
+        var blocked = await holderLife.ReconcileAsync(genA.Descriptor, allowDownload: true);
+        Check(blocked.State == NativeDvLifecycleState.Busy, "A lock held by another process is respected");
+        Check(blocked.Runtime is null, "A busy lifecycle never returns a runtime it did not verify");
+        Check(!Directory.Exists(Path.Combine(lockRoot, genA.Descriptor.VersionId)), "A busy lifecycle installs nothing");
+    }
+    finally { try { if (!holder!.HasExited) holder.Kill(true); } catch (InvalidOperationException) { } holder!.WaitForExit(10000); }
+    var afterLock = await holderLife.ReconcileAsync(genA.Descriptor, allowDownload: true);
+    Check(afterLock.State == NativeDvLifecycleState.Ready, "Once the other process releases the lock, installation proceeds");
+
+    // Nothing was ever created outside the roots the lifecycle was given.
+    Check(Directory.GetDirectories(lifeRoot).All(x => Path.GetFileName(x) is "store" or "race" or "crossprocess"),
+        "The lifecycle writes only inside the roots it was given");
+}
+finally { if (Directory.Exists(lifeRoot)) Directory.Delete(lifeRoot, true); }
+
+// ---------------------------------------------------------------------------
 // Product observation: the version-pinned log adapter.
 // ---------------------------------------------------------------------------
-const string pinnedCommit = "7e4cb538a3f30d25920ad8e87ba6571540fb729f";
 string composedLog = string.Join("\n",
     "[   0.016][v][mkv] Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track).",
     "[   0.285][v][vd] Opening decoder hevc",
@@ -374,25 +578,25 @@ string composedLog = string.Join("\n",
     "[   0.534][d][vo/gpu-next/libplacebo] [233] /* sh_dovi_compose_nlq */");
 string suppressedLog = composedLog.Replace("[   0.534][d][vo/gpu-next/libplacebo] [233] /* sh_dovi_compose_nlq */", "");
 
-var productComposed = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.41.0-1042-g7e4cb538a", pinnedCommit, true, "d3d11va");
+var productComposed = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.41.0-1042-g7e4cb538a", true, "d3d11va");
 Check(productComposed.Delivered == NativeDvDelivered.FullEnhancementLayer, "The product reports Full FEL only from observed composition");
 Check(productComposed.BlElPairing == DvObservedState.Active && productComposed.DecoderInstances == 2, "BL/EL pairing and both decoders are observed");
 Check(productComposed.HardwareSurfaces == DvObservedState.Active, "Declining an optional hwdec interop driver is not a software fallback");
 Check(!productComposed.HasDegradation, "A fully composed product session reports no degradation");
 Check(productComposed.LibplaceboApi == 371, "The renderer API is observed");
 
-var productSuppressed = NativeDvLogEvidence.Reduce(suppressedLog, "mpv v0.41.0-1042-g7e4cb538a", pinnedCommit, true, "d3d11va");
+var productSuppressed = NativeDvLogEvidence.Reduce(suppressedLog, "mpv v0.41.0-1042-g7e4cb538a", true, "d3d11va");
 Check(productSuppressed.Delivered == NativeDvDelivered.BaseLayerOnly, "Without observed composition the product reports base layer only");
 Check(productSuppressed.Degradation.Any(x => x.Contains("base-layer-only")), "The product names the base-layer-only fallback");
 Check(!productSuppressed.Summary.Contains("Full enhancement-layer"), "A base-layer product session never reads as Full FEL");
 
 // A different build invalidates the patterns, so nothing may be claimed from them.
-var wrongBuild = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.40.0-1-gdeadbeef", pinnedCommit, true, "d3d11va");
+var wrongBuild = NativeDvLogEvidence.Reduce(composedLog, "mpv v0.40.0-1-gdeadbeef", true, "d3d11va");
 Check(wrongBuild.Delivered == NativeDvDelivered.Unknown, "Log patterns from an unpinned build are not trusted");
 Check(wrongBuild.FelComposition == DvObservedState.Unknown && wrongBuild.BlElPairing == DvObservedState.Unknown,
     "An unpinned build leaves observations Unknown, not Inactive");
-Check(!NativeDvLogEvidence.VersionMatches(null, pinnedCommit), "An unknown runtime version never matches the pinned commit");
-Check(NativeDvLogEvidence.VersionMatches("mpv v0.41.0-1042-g7e4cb538a", pinnedCommit), "The pinned build is recognised");
+Check(NativeDvDiagnosticAdapters.For(null) is null, "An unknown runtime version has no verified adapter");
+Check(NativeDvDiagnosticAdapters.For("mpv v0.41.0-1042-g7e4cb538a") is not null, "The verified build is recognised");
 
 // The bounded source probe.
 var probed = NativeDvSourceProbe.Parse("AMDV|7|6|hevc|pq|bt.2020|3840|2160");
@@ -516,7 +720,7 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
             using (var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (var reader = new StreamReader(stream)) logText = reader.ReadToEnd();
 
-            var observed = NativeDvLogEvidence.Reduce(logText, version, shipped.MpvCommit, true, hwdec, "d3d11", "d3d11");
+            var observed = NativeDvLogEvidence.Reduce(logText, version, true, hwdec, "d3d11", "d3d11");
             Console.WriteLine($"  observed: delivered={observed.Delivered} composition={observed.FelComposition} pairing={observed.BlElPairing} " +
                 $"decoders={observed.DecoderInstances} surfaces={observed.HardwareSurfaces} hwdec={observed.HardwareDecoderInUse} api={observed.LibplaceboApi}");
             Check(observed.Renderer == DvObservedState.Active, "PRODUCT: the renderer is observed through the product adapter");

@@ -191,7 +191,7 @@ public sealed class PlaybackService
                 {
                     string? version = LastReport!.Observed.TryGetValue("mpv-version", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
                     string log = ReadSharedText(NativeLogPath);
-                    var observation = NativeDvLogEvidence.Reduce(log, version, NativeDolbyVision.Descriptor.MpvCommit,
+                    var observation = NativeDvLogEvidence.Reduce(log, version,
                         native.Plan.Request.EnhancementLayer,
                         LastReport.Observed.TryGetValue("hwdec-current", out var hw) && hw.ValueKind == JsonValueKind.String ? hw.GetString() : null,
                         LastReport.Observed.TryGetValue("gpu-api", out var api) ? api.ToString() : null,

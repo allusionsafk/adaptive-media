@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 
 namespace AdaptiveMedia;
@@ -56,28 +57,56 @@ public static class NativeDvSourceProbe
     }
 }
 
-/// <summary>Reads the pinned runtime's own diagnostic output into an observation.
+/// <summary>One mpv build whose diagnostic parsing contract has actually been
+/// verified. Adding a runtime means adding an entry here on purpose, after
+/// checking the patterns against that build.</summary>
+public sealed record NativeDvDiagnosticAdapter(string MpvCommit, string MpvVersionToken, string VerifiedOn, string Notes);
+
+/// <summary>The set of runtimes whose diagnostic output this application knows how
+/// to read.
 ///
-/// This adapter is deliberately narrow. mpv exposes no structured property for
-/// composition, BL/EL pairing, or the Profile 7 splitter, so those three come from
-/// log text — and log text is only trustworthy for the exact build it was written
-/// by. If the running version does not match the pinned commit, every value stays
-/// Unknown rather than being guessed from patterns that may no longer apply.</summary>
-public static class NativeDvLogEvidence
+/// Support is decided from the runtime that is actually running, never from the
+/// shipped manifest. If it were taken from the manifest, bumping the manifest
+/// would silently re-point these patterns at a build nobody had checked, and a
+/// requested Full FEL could become a claimed one. A runtime update must not be
+/// able to quietly degrade what the application says it observed.</summary>
+public static class NativeDvDiagnosticAdapters
 {
-    public static bool VersionMatches(string? observedMpvVersion, string expectedCommit)
+    public static ImmutableArray<NativeDvDiagnosticAdapter> Supported { get; } =
+    [
+        new("7e4cb538a3f30d25920ad8e87ba6571540fb729f", "g7e4cb538a", "2026-09-10",
+            "Profile 7 splitter, dual HEVC decode, [vf] [el_pair], and sh_dovi_compose_nlq confirmed against the authored source; composition signal verified to discriminate at debug level."),
+    ];
+
+    /// <summary>The adapter for the build that is actually running, or null when no
+    /// verified adapter covers it.</summary>
+    public static NativeDvDiagnosticAdapter? For(string? observedMpvVersion)
     {
-        if (string.IsNullOrWhiteSpace(observedMpvVersion) || string.IsNullOrWhiteSpace(expectedCommit)) return false;
-        // mpv reports an abbreviated commit, e.g. "mpv v0.41.0-1042-g7e4cb538a".
-        string shortCommit = expectedCommit.Length >= 9 ? expectedCommit[..9] : expectedCommit;
-        return observedMpvVersion.Contains(shortCommit, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(observedMpvVersion)) return null;
+        foreach (var adapter in Supported)
+            if (observedMpvVersion.Contains(adapter.MpvVersionToken, StringComparison.OrdinalIgnoreCase))
+                return adapter;
+        return null;
     }
 
-    public static NativeDvObservation Reduce(string? logText, string? observedMpvVersion, string expectedCommit,
+    public static bool SupportsCommit(string? commit) =>
+        !string.IsNullOrWhiteSpace(commit) &&
+        Supported.Any(x => x.MpvCommit.Equals(commit, StringComparison.OrdinalIgnoreCase));
+}
+
+/// <summary>Reads a verified runtime's own diagnostic output into an observation.
+///
+/// mpv exposes no structured property for composition, BL/EL pairing, or the
+/// Profile 7 splitter, so those three come from log text — and log text is only
+/// trustworthy for a build whose contract someone checked. An unverified build
+/// leaves every value Unknown rather than being guessed at.</summary>
+public static class NativeDvLogEvidence
+{
+    public static NativeDvObservation Reduce(string? logText, string? observedMpvVersion,
         bool requestedEnhancementLayer, string? hwdecCurrent = null, string? graphicsApi = null,
         string? graphicsContext = null)
     {
-        if (!VersionMatches(observedMpvVersion, expectedCommit))
+        if (NativeDvDiagnosticAdapters.For(observedMpvVersion) is null)
             return NativeDvObservationReducer.Reduce(rendererObserved: false, splitterObserved: false,
                 decoderInstances: 0, selectedDecoders: null, blElPairObserved: false, compositionObserved: false,
                 hardwareDecodingObserved: false, softwareFallbackObserved: false,
@@ -143,15 +172,23 @@ public sealed class NativeDvLane
     public const string DescriptorFileName = "native-dv-runtime.json";
 
     private readonly NativeDvRuntimeStore _store;
+    private readonly NativeDvRuntimeLifecycle _lifecycle;
     private readonly NativeDvRuntimeDescriptor? _descriptor;
 
     public NativeDvLane(NativeDvRuntimeStore store, NativeDvRuntimeDescriptor? descriptor)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
+        _lifecycle = new NativeDvRuntimeLifecycle(_store);
         _descriptor = descriptor;
     }
 
     public NativeDvRuntimeDescriptor? Descriptor => _descriptor;
+    public NativeDvRuntimeLifecycle Lifecycle => _lifecycle;
+
+    /// <summary>Lifecycle status without preparing playback, for the developer
+    /// setting and diagnostics.</summary>
+    public Task<NativeDvLifecycleStatus> GetStatusAsync(AppSettings settings, CancellationToken cancellation = default) =>
+        _lifecycle.ReconcileAsync(_descriptor, settings.AllowNativeDolbyVisionDownload, null, cancellation);
 
     /// <summary>Load the descriptor the application ships. It is the very same
     /// pinned manifest the experiment used, staged beside the executable, so the
@@ -173,6 +210,18 @@ public sealed class NativeDvLane
     public static NativeDvLane CreateDefault() =>
         new(new NativeDvRuntimeStore(NativeDvRuntimeStore.DefaultRootPath), LoadDescriptor());
 
+    /// <summary>The lifecycle result of the most recent preparation.</summary>
+    public NativeDvLifecycleStatus? LastStatus { get; private set; }
+
+    private static NativeDvRuntimeState MapRuntimeState(NativeDvLifecycleState state) => state switch
+    {
+        NativeDvLifecycleState.ProvisioningNotAllowed => NativeDvRuntimeState.ProvisioningNotAllowed,
+        NativeDvLifecycleState.UnsupportedRuntime => NativeDvRuntimeState.UnsupportedRuntime,
+        NativeDvLifecycleState.DescriptorUnavailable => NativeDvRuntimeState.DescriptorUnavailable,
+        NativeDvLifecycleState.VerificationFailed => NativeDvRuntimeState.ComponentHashMismatch,
+        _ => NativeDvRuntimeState.NotInstalled,
+    };
+
     public async Task<NativeDvLaneOutcome> PrepareAsync(string sourcePath, AppSettings settings,
         string configDir, string pipeName, string? logPath, PlaybackTarget? target,
         IProgress<string>? progress = null, CancellationToken cancellation = default)
@@ -185,16 +234,16 @@ public sealed class NativeDvLane
             return NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.DescriptorUnavailable,
                 "This build does not describe a native Dolby Vision runtime.");
 
-        // Resolve before probing. A probe needs the runtime anyway, and provisioning
-        // on a source that turns out not to be Profile 7 would be wasted work.
-        var resolution = _store.Resolve(_descriptor);
-        if (!resolution.IsUsable)
-        {
-            resolution = await _store.ProvisionAsync(_descriptor, settings.AllowNativeDolbyVisionDownload, progress, cancellation);
-            if (!resolution.IsUsable)
-                return NativeDvLaneOutcome.NotSelected(resolution.State,
-                    resolution.FailureReason ?? "The native Dolby Vision runtime is unavailable.");
-        }
+        // Reconcile before probing. A probe needs the runtime anyway, and installing
+        // for a source that turns out not to be Profile 7 would be wasted work.
+        // Reconciliation also retains the outgoing generation and removes only
+        // superseded ones.
+        var status = await _lifecycle.ReconcileAsync(_descriptor, settings.AllowNativeDolbyVisionDownload, progress, cancellation);
+        LastStatus = status;
+        if (status.Runtime is null)
+            return NativeDvLaneOutcome.NotSelected(MapRuntimeState(status.State), status.Reason ?? status.Summary);
+        var resolution = new NativeDvRuntimeResolution(NativeDvRuntimeState.Installed, status.Runtime,
+            _store.GenerationPath(_descriptor), null);
 
         var facts = await NativeDvSourceProbe.ReadAsync(resolution.Runtime!.ExecutablePath, sourcePath, TimeSpan.FromSeconds(30));
         if (!facts.IsProfile7)
