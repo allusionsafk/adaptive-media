@@ -1,0 +1,48 @@
+name: Playback or product bug
+description: Report a reproducible Adaptive Media problem.
+title: "[bug] "
+labels: []
+body:
+  - type: input
+    id: build
+    attributes:
+      label: Build or commit
+      placeholder: commit SHA or local build
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows and relevant hardware
+      placeholder: Windows 11, GPU, driver version if relevant
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Include the exact error or visible behaviour. Remove personal paths and private media details.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Media details
+      description: Optional. Container, codec, resolution, HDR/Dolby Vision profile, audio format, or other details needed to reproduce the problem.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitised diagnostics
+      description: Optional. Do not include private media, credentials, tokens, personal paths, or unrelated machine information.
