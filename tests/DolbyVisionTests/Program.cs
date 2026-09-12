@@ -637,6 +637,359 @@ Check(NativeDvPlaybackPlanner.Build(unclassified, pinned, @"C:\m.mkv", "c", "p",
     "An unclassified source does not inherit the FEL wording");
 
 
+
+// ---------------------------------------------------------------------------
+// Playback-time runtime health.
+//
+// The model has to separate a runtime that broke from media it was right to
+// refuse and from a person who stopped watching. Only the first may cost a
+// generation its standing, and none of it may promote a composition claim.
+// ---------------------------------------------------------------------------
+NativeDvHealthSignals Signals(bool selected = true, bool started = true, bool ipc = true,
+    bool renderer = true, bool decoder = true, bool output = true, bool adapter = true,
+    bool stop = false, int exit = 0, double seconds = 30) =>
+    new()
+    {
+        LaneSelected = selected, ProcessStarted = started, IpcConnected = ipc,
+        RendererObserved = renderer, VideoDecoderObserved = decoder, VideoOutputConfigured = output,
+        ObservationAdapterSupported = adapter, StopRequested = stop, ExitCode = exit,
+        Lifetime = TimeSpan.FromSeconds(seconds),
+    };
+
+// The healthy-start threshold. Each condition is load-bearing: dropping any one
+// of them must take the attempt below the threshold.
+Check(NativeDvUsefulPlayback.Reached(Signals()), "A runtime that connected, rendered, decoded and configured its output reached useful playback");
+Check(!NativeDvUsefulPlayback.Reached(Signals(ipc: false)), "Without a diagnostics connection the threshold is not reached");
+Check(!NativeDvUsefulPlayback.Reached(Signals(renderer: false)), "Without a renderer the threshold is not reached");
+Check(!NativeDvUsefulPlayback.Reached(Signals(decoder: false)), "Without a video decoder the threshold is not reached");
+Check(!NativeDvUsefulPlayback.Reached(Signals(output: false)), "Without a frame configuring the video output the threshold is not reached");
+// The threshold must be meaningfully stronger than "a process appeared".
+Check(!NativeDvUsefulPlayback.Reached(Signals(ipc: false, renderer: false, decoder: false, output: false)),
+    "A process that merely spawned has not started useful playback");
+
+// Case 1: the current generation succeeds, so nothing is rolled back.
+var healthy = NativeDvHealthEvaluator.Evaluate(Signals());
+Check(healthy.Health == NativeDvHealth.Healthy && !healthy.RollbackCandidate, "A healthy attempt triggers no rollback");
+Check(!healthy.MarksGenerationUnhealthy && !healthy.RuntimeAtFault, "A healthy attempt holds nothing against the generation");
+
+// Cases 10 and 11: real runtime failures before useful playback are eligible.
+var rendererFailed = NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: 1));
+Check(rendererFailed.Health == NativeDvHealth.RendererInitializationFailed && rendererFailed.RollbackCandidate,
+    "A renderer or device failure is an eligible health failure");
+var crashed = NativeDvHealthEvaluator.Evaluate(Signals(ipc: false, renderer: false, decoder: false, output: false,
+    exit: unchecked((int)0xC0000005), seconds: 0.3));
+Check(crashed.Health == NativeDvHealth.ProcessCrashed && crashed.RollbackCandidate,
+    "An immediate process crash is an eligible health failure");
+Check(NativeDvHealthEvaluator.ExitCodeMeansCrash(unchecked((int)0xC0000005)) &&
+      NativeDvHealthEvaluator.ExitCodeMeansCrash(-1073741819) && !NativeDvHealthEvaluator.ExitCodeMeansCrash(1),
+    "A crash is recognised from an NTSTATUS-shaped exit code, not from an ordinary error code");
+var decoderFailed = NativeDvHealthEvaluator.Evaluate(Signals(decoder: false, output: false, exit: 1));
+Check(decoderFailed.Health == NativeDvHealth.DecoderInitializationFailed && decoderFailed.RollbackCandidate,
+    "A decoder that never initialised is an eligible health failure");
+var silentExit = NativeDvHealthEvaluator.Evaluate(Signals(ipc: false, renderer: false, decoder: false, output: false, exit: 1));
+Check(silentExit.Health == NativeDvHealth.ExitedBeforeUsefulPlayback && silentExit.RollbackCandidate,
+    "A runtime that exited without reporting anything is an eligible health failure");
+var launchFailed = NativeDvHealthEvaluator.Evaluate(Signals(started: false, ipc: false, renderer: false, decoder: false, output: false));
+Check(launchFailed.Health == NativeDvHealth.LaunchFailed && launchFailed.RollbackCandidate,
+    "A runtime that could not be started at all is an eligible health failure");
+
+// A running build with no verified adapter cannot report what it composed, and
+// that is a runtime problem rather than a media one.
+var unreadable = NativeDvHealthEvaluator.Evaluate(Signals(adapter: false, renderer: false, decoder: false, output: false, exit: 1));
+Check(unreadable.Health == NativeDvHealth.ObservationContractFailed && unreadable.RollbackCandidate,
+    "A running runtime this build cannot read is an eligible health failure");
+
+// Cases 7, 8 and 9: media, user and normal outcomes must never poison a generation.
+foreach (int unplayable in new[] { 2, 3 })
+{
+    var media = NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: unplayable));
+    Check(media.Health == NativeDvHealth.SourceNotPlayable && !media.MarksGenerationUnhealthy && !media.RollbackCandidate,
+        $"A source the runtime cannot play (exit {unplayable}) never marks the generation unhealthy");
+}
+var userStopped = NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, stop: true, exit: 1));
+Check(userStopped.Health == NativeDvHealth.StoppedByUser && !userStopped.MarksGenerationUnhealthy,
+    "User cancellation never marks the generation unhealthy, even with an abnormal exit on the way out");
+var signalled = NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: 4));
+Check(signalled.Health == NativeDvHealth.StoppedByUser && !signalled.MarksGenerationUnhealthy,
+    "A runtime quit by a signal is an external stop, not a runtime fault");
+var normalExit = NativeDvHealthEvaluator.Evaluate(Signals(stop: true));
+Check(normalExit.Health == NativeDvHealth.Healthy && !normalExit.MarksGenerationUnhealthy,
+    "A normal exit after real playback is healthy and marks nothing unhealthy");
+var shortClean = NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: 0, seconds: 0.4));
+Check(shortClean.Health == NativeDvHealth.Unknown && !shortClean.MarksGenerationUnhealthy && !shortClean.RollbackCandidate,
+    "A clean exit before the threshold is unknown, never a fault: absent evidence is not evidence of a fault");
+var notUsed = NativeDvHealthEvaluator.Evaluate(Signals(selected: false));
+Check(notUsed.Health == NativeDvHealth.NotEvaluated && !notUsed.MarksGenerationUnhealthy,
+    "An attempt that never used the native lane is not evaluated");
+
+// A fault after useful playback is truthfully a fault, and deliberately not a
+// rollback trigger: the generation demonstrably worked.
+var lateFailure = NativeDvHealthEvaluator.Evaluate(Signals(exit: 1));
+Check(lateFailure.Health == NativeDvHealth.FailedAfterUsefulPlayback && lateFailure.RuntimeAtFault,
+    "A failure after useful playback is reported as a real runtime fault");
+Check(!lateFailure.RollbackCandidate && !lateFailure.MarksGenerationUnhealthy,
+    "A failure after useful playback never restarts playback on an older runtime");
+
+// Observing base layer only is a truthful composition outcome, not ill health.
+// Rolling back on it would mean treating a MEL source, or a correct refusal to
+// compose, as a broken build.
+Check(NativeDvHealthEvaluator.Evaluate(Signals()).Health == NativeDvHealth.Healthy,
+    "Health is decided by whether playback started, never by what was composed");
+
+// Session-local health memory. It is the thing that makes a bounce impossible.
+var memory = new NativeDvHealthMemory();
+string genOne = new string('1', 64);
+string genTwo = new string('2', 64);
+memory.Record(genOne, healthy);
+Check(memory.FaultCount(genOne) == 0 && !memory.IsKnownUnhealthy(genOne), "A healthy attempt records no fault");
+memory.Record(genOne, userStopped); memory.Record(genOne, shortClean); memory.Record(genOne, lateFailure);
+foreach (int unplayable in new[] { 2 })
+    memory.Record(genOne, NativeDvHealthEvaluator.Evaluate(Signals(renderer: false, decoder: false, output: false, exit: unplayable)));
+Check(memory.FaultCount(genOne) == 0,
+    "Media refusals, user stops, unknown outcomes and post-playback failures all leave the generation unmarked");
+memory.Record(genOne, rendererFailed);
+Check(memory.IsKnownUnhealthy(genOne) && memory.FaultCount(genOne) == 1, "A runtime fault before useful playback is recorded");
+Check(!memory.IsDemoted(genOne), "One transient failure never demotes a hash-verified runtime");
+Check(memory.LastHealth(genOne) == NativeDvHealth.RendererInitializationFailed, "The recorded health names the failure");
+memory.Record(genOne, crashed);
+Check(memory.IsDemoted(genOne) && memory.FaultCount(genOne) == NativeDvHealthMemory.DemotionThreshold,
+    "Repeated failures demote the generation for this session only");
+Check(!memory.IsKnownUnhealthy(genTwo) && !memory.IsDemoted(genTwo), "One generation's failures say nothing about another");
+memory.Clear(genOne);
+Check(!memory.IsKnownUnhealthy(genOne), "An explicit retry clears the session-local judgement");
+memory.Record("not-a-generation-id", rendererFailed);
+memory.Record(null, rendererFailed);
+Check(memory.FaultCount("not-a-generation-id") == 0, "Health is only ever recorded against a real generation id");
+
+// The product-facing lines never claim a composition result.
+foreach (NativeDvPlaybackStatus status in Enum.GetValues<NativeDvPlaybackStatus>())
+{
+    string text = NativeDvPlaybackStatusText.Describe(status);
+    Check(text.Length > 0 && !text.Contains("Full enhancement", StringComparison.OrdinalIgnoreCase),
+        $"The status line for {status} says something and claims no composition");
+}
+
+// ---------------------------------------------------------------------------
+// Recorded manifests, generation pinning, and fallback eligibility.
+//
+// A retained generation may only be launched when it has been verified the same
+// way it was verified at install. Everything below is a refusal to launch
+// something unproven.
+// ---------------------------------------------------------------------------
+string healthRoot = Path.Combine(Path.GetTempPath(), "adaptive-media-health-" + Guid.NewGuid().ToString("N"));
+try
+{
+    (NativeDvRuntimeDescriptor Descriptor, byte[] Archive, byte[] Exe, byte[] Com) HealthGeneration(string label, string commit)
+    {
+        byte[] exe = System.Text.Encoding.UTF8.GetBytes("mpv-executable-" + label);
+        byte[] com = System.Text.Encoding.UTF8.GetBytes("mpv-launcher-" + label);
+        byte[] archive = System.Text.Encoding.UTF8.GetBytes("archive-payload-" + label);
+        string json = $$"""
+        {
+          "schemaVersion": 1,
+          "provider": { "name": "test", "releaseUrl": "https://example.invalid/r" },
+          "archive": { "url": "https://example.invalid/{{label}}.7z", "bytes": {{archive.Length}}, "sha256": "{{Sha256Of(archive)}}" },
+          "runtime": {
+            "executable": { "pathRelativeToManifest": "../x/extracted/mpv.exe", "bytes": {{exe.Length}}, "sha256": "{{Sha256Of(exe)}}" },
+            "consoleLauncher": { "pathRelativeToManifest": "../x/extracted/mpv.com", "bytes": {{com.Length}}, "sha256": "{{Sha256Of(com)}}" }
+          },
+          "mpv": { "version": "0.41.0-test-{{label}}", "commit": "{{commit}}" },
+          "libplacebo": { "apiVersion": 371 }
+        }
+        """;
+        return (NativeDvRuntimeDescriptor.FromManifestJson(json), archive, exe, com);
+    }
+
+    string verifiedCommit = NativeDvDiagnosticAdapters.Supported[0].MpvCommit;
+    var hA = HealthGeneration("health-alpha", verifiedCommit);
+    var hB = HealthGeneration("health-beta", verifiedCommit);
+
+    NativeDvArchiveFetch HealthFetch(params (NativeDvRuntimeDescriptor D, byte[] A)[] known) => (uri, destination, token) =>
+    {
+        foreach (var k in known)
+            if (uri.AbsoluteUri.Contains(k.D.ArchiveUrl.Segments[^1])) { File.WriteAllBytes(destination, k.A); return Task.CompletedTask; }
+        throw new IOException("no archive for " + uri);
+    };
+    NativeDvArchiveExtract HealthExtract(params (NativeDvRuntimeDescriptor D, byte[] E, byte[] C)[] known) => (archive, destination, token) =>
+    {
+        byte[] bytes = File.ReadAllBytes(archive);
+        foreach (var k in known)
+            if (Sha256Of(bytes) == k.D.ArchiveSha256)
+            {
+                File.WriteAllBytes(Path.Combine(destination, "mpv.exe"), k.E);
+                File.WriteAllBytes(Path.Combine(destination, "mpv.com"), k.C);
+                return Task.CompletedTask;
+            }
+        throw new IOException("unknown archive");
+    };
+
+    string hRoot = Path.Combine(healthRoot, "store");
+    var hStore = new NativeDvRuntimeStore(hRoot,
+        HealthFetch((hA.Descriptor, hA.Archive), (hB.Descriptor, hB.Archive)),
+        HealthExtract((hA.Descriptor, hA.Exe, hA.Com), (hB.Descriptor, hB.Exe, hB.Com)));
+    var hLife = new NativeDvRuntimeLifecycle(hStore);
+
+    // Case 4: nothing retained yet, so there is nothing to fall back to.
+    await hLife.ReconcileAsync(hA.Descriptor, allowDownload: true);
+    var noPrevious = hLife.ResolveFallback(hA.Descriptor.VersionId);
+    Check(noPrevious.State == NativeDvFallbackState.NoPreviousGeneration && !noPrevious.IsUsable,
+        "With no retained generation there is no fallback");
+    Check(noPrevious.Runtime is null, "An unavailable fallback never carries a runtime");
+
+    // Installing a generation records its own pinned manifest, outside the
+    // generation tree so the installed tree stays immutable.
+    var snapshotA = hStore.ReadDescriptorSnapshot(hA.Descriptor.VersionId);
+    Check(snapshotA is not null, "Installing a generation records its own pinned manifest");
+    Check(snapshotA!.VersionId == hA.Descriptor.VersionId && snapshotA.MpvCommit == hA.Descriptor.MpvCommit &&
+          snapshotA.MpvVersion == hA.Descriptor.MpvVersion && snapshotA.LibplaceboApi == hA.Descriptor.LibplaceboApi,
+        "The recorded manifest round-trips the generation's identity");
+    Check(snapshotA.LauncherRelativePath == hA.Descriptor.LauncherRelativePath &&
+          snapshotA.Components.Length == hA.Descriptor.Components.Length &&
+          snapshotA.Components.All(x => hA.Descriptor.Components.Any(y => y.RelativePath == x.RelativePath &&
+              y.Sha256 == x.Sha256 && y.Bytes == x.Bytes)),
+        "The recorded manifest round-trips every pinned component");
+    Check(!File.Exists(Path.Combine(hRoot, hA.Descriptor.VersionId, "manifest.json")) &&
+          File.Exists(hStore.DescriptorSnapshotPath(hA.Descriptor.VersionId)),
+        "The recorded manifest is kept beside the generations, never written into an installed tree");
+    Check(hStore.Resolve(snapshotA).IsUsable, "A generation validates against its own recorded manifest");
+
+    // Case 2 precondition: after an upgrade the retained generation is a usable
+    // fallback, verified in full rather than trusted.
+    await hLife.ReconcileAsync(hB.Descriptor, allowDownload: true);
+    var available = hLife.ResolveFallback(hB.Descriptor.VersionId);
+    Check(available.State == NativeDvFallbackState.Available && available.IsUsable,
+        "After an upgrade the retained generation is an eligible fallback");
+    Check(available.GenerationId == hA.Descriptor.VersionId, "The fallback is the retained previous generation");
+    Check(available.Runtime!.ExecutablePath == Path.Combine(hRoot, hA.Descriptor.VersionId, "mpv.exe"),
+        "The fallback resolves inside its own generation");
+    Check(!available.Runtime.ExecutablePath.StartsWith(@"C:\mpv\", StringComparison.OrdinalIgnoreCase),
+        "A fallback is never the stable runtime");
+
+    // Case 14: a fallback can never bounce back to the generation that just
+    // failed, to one already tried, or to one already known to have failed.
+    Check(hLife.ResolveFallback(hA.Descriptor.VersionId).State == NativeDvFallbackState.NoPreviousGeneration,
+        "The generation that just failed is never offered as its own fallback");
+    Check(hLife.ResolveFallback(hB.Descriptor.VersionId, [hA.Descriptor.VersionId]).State == NativeDvFallbackState.AlreadyAttempted,
+        "A generation already tried for this playback is not offered again");
+    var bounceMemory = new NativeDvHealthMemory();
+    bounceMemory.Record(hA.Descriptor.VersionId, rendererFailed);
+    Check(hLife.ResolveFallback(hB.Descriptor.VersionId, null, bounceMemory).State == NativeDvFallbackState.KnownUnhealthy,
+        "A generation that already failed this session is not offered as a fallback");
+
+    // Case 6: a retained generation with no verified diagnostic adapter is
+    // refused, and refused before its tree is hashed.
+    var hC = HealthGeneration("health-unsupported", "0000000000000000000000000000000000000000");
+    string unsupportedRoot = Path.Combine(healthRoot, "unsupported");
+    Directory.CreateDirectory(Path.Combine(unsupportedRoot, hC.Descriptor.VersionId));
+    File.WriteAllBytes(Path.Combine(unsupportedRoot, hC.Descriptor.VersionId, "mpv.exe"), hC.Exe);
+    File.WriteAllBytes(Path.Combine(unsupportedRoot, hC.Descriptor.VersionId, "mpv.com"), hC.Com);
+    var unsupportedStore = new NativeDvRuntimeStore(unsupportedRoot);
+    Check(unsupportedStore.WriteDescriptorSnapshot(hC.Descriptor), "A recorded manifest can be written for any generation");
+    File.WriteAllText(Path.Combine(unsupportedRoot, NativeDvRuntimeLifecycle.StateFileName),
+        System.Text.Json.JsonSerializer.Serialize(new NativeDvLifecycleRecord(hB.Descriptor.VersionId, hC.Descriptor.VersionId, null)));
+    var unsupportedFallback = new NativeDvRuntimeLifecycle(unsupportedStore).ResolveFallback(hB.Descriptor.VersionId);
+    Check(unsupportedFallback.State == NativeDvFallbackState.AdapterUnsupported && !unsupportedFallback.IsUsable,
+        "A retained generation with no verified diagnostic adapter is refused as a fallback");
+    Check(unsupportedFallback.Runtime is null, "An unsupported fallback is never resolved to a runtime to launch");
+    Check(unsupportedFallback.Reason.Contains(hC.Descriptor.MpvCommit, StringComparison.OrdinalIgnoreCase),
+        "The refusal names the build it could not read");
+
+    // Case 5: a retained generation that no longer matches its manifest is
+    // refused, and must not be launched.
+    string tamperRoot = Path.Combine(healthRoot, "tampered");
+    Directory.CreateDirectory(Path.Combine(tamperRoot, hA.Descriptor.VersionId));
+    File.WriteAllBytes(Path.Combine(tamperRoot, hA.Descriptor.VersionId, "mpv.exe"),
+        System.Text.Encoding.UTF8.GetBytes(new string('x', hA.Exe.Length)));
+    File.WriteAllBytes(Path.Combine(tamperRoot, hA.Descriptor.VersionId, "mpv.com"), hA.Com);
+    var tamperStore = new NativeDvRuntimeStore(tamperRoot);
+    tamperStore.WriteDescriptorSnapshot(hA.Descriptor);
+    File.WriteAllText(Path.Combine(tamperRoot, NativeDvRuntimeLifecycle.StateFileName),
+        System.Text.Json.JsonSerializer.Serialize(new NativeDvLifecycleRecord(hB.Descriptor.VersionId, hA.Descriptor.VersionId, null)));
+    var tamperedFallback = new NativeDvRuntimeLifecycle(tamperStore).ResolveFallback(hB.Descriptor.VersionId);
+    Check(tamperedFallback.State == NativeDvFallbackState.StructurallyInvalid && !tamperedFallback.IsUsable,
+        "A retained generation that fails its pinned hash is refused as a fallback");
+    Check(tamperedFallback.Runtime is null, "A hash-invalid fallback is never resolved to a runtime to launch");
+
+    // A generation on disk with no recorded manifest cannot be verified, so it is
+    // not launched on the strength of its directory name.
+    string unrecordedRoot = Path.Combine(healthRoot, "unrecorded");
+    Directory.CreateDirectory(Path.Combine(unrecordedRoot, hA.Descriptor.VersionId));
+    File.WriteAllBytes(Path.Combine(unrecordedRoot, hA.Descriptor.VersionId, "mpv.exe"), hA.Exe);
+    File.WriteAllBytes(Path.Combine(unrecordedRoot, hA.Descriptor.VersionId, "mpv.com"), hA.Com);
+    File.WriteAllText(Path.Combine(unrecordedRoot, NativeDvRuntimeLifecycle.StateFileName),
+        System.Text.Json.JsonSerializer.Serialize(new NativeDvLifecycleRecord(hB.Descriptor.VersionId, hA.Descriptor.VersionId, null)));
+    var unrecorded = new NativeDvRuntimeLifecycle(new NativeDvRuntimeStore(unrecordedRoot)).ResolveFallback(hB.Descriptor.VersionId);
+    Check(unrecorded.State == NativeDvFallbackState.ManifestUnavailable && !unrecorded.IsUsable,
+        "A retained generation with no recorded manifest is never launched unverified");
+
+    // A recorded manifest must describe the generation it is filed under, so an
+    // edited or misfiled one cannot stand in for another build.
+    var misfiled = new NativeDvRuntimeStore(Path.Combine(healthRoot, "misfiled"));
+    misfiled.WriteDescriptorSnapshot(hA.Descriptor);
+    string misfiledPath = misfiled.DescriptorSnapshotPath(hB.Descriptor.VersionId);
+    Directory.CreateDirectory(Path.GetDirectoryName(misfiledPath)!);
+    File.Copy(misfiled.DescriptorSnapshotPath(hA.Descriptor.VersionId), misfiledPath, overwrite: true);
+    Check(misfiled.ReadDescriptorSnapshot(hB.Descriptor.VersionId) is null,
+        "A recorded manifest filed under the wrong generation is ignored");
+    foreach (string bad in new[] { "..", "../../evil", "short", "", "  " })
+        Check(misfiled.ReadDescriptorSnapshot(bad) is null, $"'{bad}' is never read as a recorded manifest");
+    File.WriteAllText(misfiled.DescriptorSnapshotPath(hA.Descriptor.VersionId), "{ not json");
+    Check(misfiled.ReadDescriptorSnapshot(hA.Descriptor.VersionId) is null,
+        "A corrupt recorded manifest reads as absent rather than throwing");
+
+    // Case 15: a pinned generation cannot be collected out from under a launch.
+    Check(Directory.Exists(Path.Combine(hRoot, hA.Descriptor.VersionId)), "The retained generation is on disk before pinning");
+    using (var pin = hStore.PinGeneration(hA.Descriptor.VersionId))
+    {
+        Check(pin is not null, "A validated generation can be pinned for the life of a launch");
+        Check(hStore.IsPinned(hA.Descriptor.VersionId) && !hStore.IsPinned(hB.Descriptor.VersionId),
+            "A pin names exactly one generation");
+        // Force the retained generation out of the keep set, which is the only way
+        // garbage collection would consider it at all.
+        int removedWhilePinned = hLife.CollectGarbage(hB.Descriptor, new NativeDvLifecycleRecord(hB.Descriptor.VersionId, null, null));
+        Check(removedWhilePinned == 0 && Directory.Exists(Path.Combine(hRoot, hA.Descriptor.VersionId)),
+            "A pinned generation survives garbage collection that would otherwise remove it");
+        // The directory surviving is not enough. Cleanup must not have deleted
+        // anything inside it either: a recursive delete that is allowed to start
+        // and then fail strips whatever it reached first and leaves the generation
+        // present but unusable, which is worse than either outcome.
+        Check(hStore.Resolve(hA.Descriptor).IsUsable, "A pinned generation still validates, with none of its files stripped");
+        Check(hStore.ReadDescriptorSnapshot(hA.Descriptor.VersionId) is not null,
+            "A pinned generation keeps its recorded manifest through garbage collection");
+    }
+    Check(!hStore.IsPinned(hA.Descriptor.VersionId), "Releasing the pin clears the in-use marker");
+    // Released, and now genuinely superseded, it may be collected.
+    int removedAfterRelease = hLife.CollectGarbage(hB.Descriptor, new NativeDvLifecycleRecord(hB.Descriptor.VersionId, null, null));
+    Check(removedAfterRelease == 1 && !Directory.Exists(Path.Combine(hRoot, hA.Descriptor.VersionId)),
+        "Once released and superseded, the generation is collected normally");
+    Check(hStore.ReadDescriptorSnapshot(hA.Descriptor.VersionId) is null,
+        "A collected generation's recorded manifest is collected with it");
+    Check(hStore.ReadDescriptorSnapshot(hB.Descriptor.VersionId) is not null,
+        "The surviving generation keeps its recorded manifest");
+
+    // The pin holds a file other than the launcher, so it can never interfere with
+    // starting the runtime it is protecting.
+    using (var pinB = hStore.PinGeneration(hB.Descriptor.VersionId))
+    {
+        Check(pinB is not null, "The current generation can be pinned while it plays");
+        // The pin is a marker outside the generation, so it cannot contend with
+        // the loader for the executable it is protecting.
+        using var launcher = new FileStream(Path.Combine(hRoot, hB.Descriptor.VersionId, "mpv.exe"),
+            FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        Check(launcher.Length > 0, "Pinning a generation leaves its launcher openable, so it can still be started");
+        Check(hStore.PinGeneration(null) is null && hStore.PinGeneration("../../evil") is null,
+            "Only a real generation id can be pinned");
+    }
+
+    // Nothing was created outside the roots these tests were given.
+    Check(Directory.GetDirectories(healthRoot).All(x => Path.GetFileName(x)
+            is "store" or "unsupported" or "tampered" or "unrecorded" or "misfiled"),
+        "Health and fallback resolution write only inside the roots they were given");
+    Check(!Directory.Exists(@"C:\mpv\" + hA.Descriptor.VersionId) && !Directory.Exists(@"C:\mpv\" + hB.Descriptor.VersionId),
+        "Nothing in the health path ever writes near the stable runtime");
+}
+finally { if (Directory.Exists(healthRoot)) Directory.Delete(healthRoot, true); }
+
 // ---------------------------------------------------------------------------
 // Opt-in product-path check against a real authored Profile 7 source.
 // Set ADAPTIVE_MEDIA_NATIVE_DV_SOURCE to the file to exercise real provisioning,

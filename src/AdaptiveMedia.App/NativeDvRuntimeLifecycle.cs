@@ -51,6 +51,38 @@ public sealed record NativeDvLifecycleStatus(
     };
 }
 
+/// <summary>Whether the retained previous generation may be used as a playback
+/// fallback, and if not, why not. Stable diagnostics identifiers; append rather
+/// than renumber.</summary>
+public enum NativeDvFallbackState
+{
+    Available = 0,
+    NoPreviousGeneration = 1,
+    /// <summary>The generation is on disk but its own pinned manifest was never
+    /// recorded, so nothing can verify it before it is launched.</summary>
+    ManifestUnavailable = 2,
+    /// <summary>The generation no longer matches the manifest that admitted it.</summary>
+    StructurallyInvalid = 3,
+    /// <summary>No verified diagnostic adapter covers this build.</summary>
+    AdapterUnsupported = 4,
+    /// <summary>Already tried during this playback attempt.</summary>
+    AlreadyAttempted = 5,
+    /// <summary>Already failed earlier in this session.</summary>
+    KnownUnhealthy = 6,
+}
+
+/// <summary>A retained generation considered as a playback fallback. A runtime is
+/// only ever present here when it validated in full.</summary>
+public sealed record NativeDvFallbackCandidate(
+    NativeDvFallbackState State,
+    string? GenerationId,
+    NativeDvRuntimeDescriptor? Descriptor,
+    NativeDvRuntime? Runtime,
+    string Reason)
+{
+    public bool IsUsable => State == NativeDvFallbackState.Available && Runtime is not null && Descriptor is not null;
+}
+
 /// <summary>Versioned lifecycle over the content-addressed runtime store.
 ///
 /// The store installs and validates one generation. This adds the part a product
@@ -77,9 +109,11 @@ public sealed class NativeDvRuntimeLifecycle
 
     /// <summary>A generation id is the archive SHA-256 and nothing else. Anything
     /// that is not exactly that is never treated as a generation, so a malformed or
-    /// hostile state file cannot name a directory to act on.</summary>
-    public static bool IsGenerationId(string? value) =>
-        value is { Length: 64 } && value.All(Uri.IsHexDigit);
+    /// hostile state file cannot name a directory to act on.
+    ///
+    /// The rule itself lives in the store, which is the layer that names
+    /// directories; this defers to it so the two cannot drift apart.</summary>
+    public static bool IsGenerationId(string? value) => NativeDvRuntimeStore.IsGenerationIdentifier(value);
 
     public NativeDvLifecycleRecord ReadState()
     {
@@ -193,6 +227,14 @@ public sealed class NativeDvRuntimeLifecycle
             : new NativeDvLifecycleRecord(descriptor.VersionId, prior.Current, DateTimeOffset.UtcNow.ToString("o"));
         if (!ReferenceEquals(next, prior)) WriteState(next);
 
+        // Record this generation's own pinned manifest while we still have it.
+        // Once it has been superseded the shipped descriptor describes a different
+        // build, and without this there would be nothing to validate it against if
+        // playback ever had to fall back to it. Writing it every time is
+        // deliberate: it also backfills a generation installed before this existed,
+        // as soon as that generation is reconciled again.
+        _store.WriteDescriptorSnapshot(descriptor);
+
         int removed = CollectGarbage(descriptor, next);
         var state = wasAnUpdate && provisioned ? NativeDvLifecycleState.Updated : NativeDvLifecycleState.Ready;
         return new(state, resolution.Runtime, next.Current, next.Previous, removed, null);
@@ -224,6 +266,10 @@ public sealed class NativeDvRuntimeLifecycle
             string name = Path.GetFileName(directory);
             if (!IsGenerationId(name)) continue;           // staging and anything unexpected is left alone
             if (keep.Contains(name)) continue;
+            // In use by this or another process: excluded before any deletion is
+            // attempted. Letting the delete run and fail would strip whatever it
+            // reached first and leave a gutted directory behind.
+            if (_store.IsPinned(name)) continue;
             // Re-derive the path from the validated name rather than trusting the
             // enumerated string, and require it to sit directly under the root.
             string target = Path.GetFullPath(Path.Combine(root, name));
@@ -232,10 +278,82 @@ public sealed class NativeDvRuntimeLifecycle
             catch (IOException) { }                        // in use: leave it for next time
             catch (UnauthorizedAccessException) { }
         }
+        // Recorded manifests follow the generations they describe, so a manifest is
+        // kept for anything still on disk as well as anything deliberately
+        // retained. A generation that survived because it was in use must keep its
+        // manifest, or it would stop being validatable as a fallback. This is not
+        // counted in the return value: removing a manifest does not remove a
+        // runtime.
+        var manifestsToKeep = new HashSet<string>(keep, StringComparer.OrdinalIgnoreCase);
+        foreach (string directory in Directory.EnumerateDirectories(root))
+        {
+            string name = Path.GetFileName(directory);
+            if (IsGenerationId(name)) manifestsToKeep.Add(name);
+        }
+        _store.CleanupDescriptorSnapshots(manifestsToKeep);
         return removed;
     }
 
     /// <summary>Remove staging left behind by an interrupted install, under the same
     /// root check. Promoted generations are never touched.</summary>
     public int CleanupStaging() => _store.CleanupStaging();
+
+    /// <summary>Decide whether the retained previous generation may be used as a
+    /// playback fallback, and if not, exactly why.
+    ///
+    /// Every gate here is a refusal to launch something unproven. The retained
+    /// generation is validated by the same full component-hash check that admitted
+    /// it in the first place, and its diagnostic adapter is checked before that, so
+    /// a fallback can never be a runtime this build would be unable to read. The
+    /// generation that just failed, anything already tried in this attempt, and
+    /// anything already known to have failed this session are all excluded, which
+    /// is what makes a rollback unable to bounce.
+    ///
+    /// This reports; it does not promote. Nothing here changes which generation is
+    /// current, and nothing here writes to the store.</summary>
+    public NativeDvFallbackCandidate ResolveFallback(string? failedGenerationId,
+        IReadOnlyCollection<string>? alreadyAttempted = null, NativeDvHealthMemory? health = null)
+    {
+        string? previous = ReadState().Previous;
+        if (!IsGenerationId(previous))
+            return new(NativeDvFallbackState.NoPreviousGeneration, null, null, null,
+                "No previous native Dolby Vision runtime is retained.");
+
+        if (IsGenerationId(failedGenerationId) &&
+            previous!.Equals(failedGenerationId, StringComparison.OrdinalIgnoreCase))
+            return new(NativeDvFallbackState.NoPreviousGeneration, previous, null, null,
+                "The retained runtime is the one that just failed, so there is nothing to fall back to.");
+
+        if (alreadyAttempted is not null &&
+            alreadyAttempted.Any(x => previous!.Equals(x, StringComparison.OrdinalIgnoreCase)))
+            return new(NativeDvFallbackState.AlreadyAttempted, previous, null, null,
+                "The retained native Dolby Vision runtime was already tried for this playback.");
+
+        if (health is not null && health.IsKnownUnhealthy(previous))
+            return new(NativeDvFallbackState.KnownUnhealthy, previous, null, null,
+                "The retained native Dolby Vision runtime already failed earlier in this session.");
+
+        // Without its own pinned manifest there is nothing to validate the tree
+        // against, and launching it on the strength of its directory name alone
+        // would defeat the point of a content-addressed store.
+        var descriptor = _store.ReadDescriptorSnapshot(previous);
+        if (descriptor is null)
+            return new(NativeDvFallbackState.ManifestUnavailable, previous, null, null,
+                "The retained native Dolby Vision runtime has no recorded manifest, so it cannot be verified before use.");
+
+        // Asked before hashing: a runtime this build cannot read would be refused
+        // anyway, and validating it first would mean hashing the whole runtime to
+        // reach the same answer.
+        if (!NativeDvDiagnosticAdapters.SupportsCommit(descriptor.MpvCommit))
+            return new(NativeDvFallbackState.AdapterUnsupported, previous, descriptor, null,
+                $"This build has no verified way to read diagnostics from mpv {descriptor.MpvCommit}, so falling back to it could not report what playback composed.");
+
+        var resolution = _store.Resolve(descriptor);
+        if (!resolution.IsUsable)
+            return new(NativeDvFallbackState.StructurallyInvalid, previous, descriptor, null,
+                resolution.FailureReason ?? "The retained native Dolby Vision runtime no longer validates.");
+
+        return new(NativeDvFallbackState.Available, previous, descriptor, resolution.Runtime,
+            $"The retained native Dolby Vision runtime {descriptor.MpvVersion} validated and can be used as a fallback.");
+    }
 }

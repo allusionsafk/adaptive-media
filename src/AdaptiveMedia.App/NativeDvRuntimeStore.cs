@@ -134,6 +134,15 @@ public sealed class NativeDvRuntimeStore
 {
     public const string StagingDirectoryName = ".staging";
 
+    /// <summary>Where a generation's own pinned manifest is kept. It sits beside
+    /// the generations rather than inside one, so recording it never writes into
+    /// an installed tree and an installed generation stays immutable.</summary>
+    public const string DescriptorDirectoryName = ".descriptors";
+
+    /// <summary>Where in-use markers live. Outside the generations, and not named
+    /// like one, so cleanup never mistakes it for a runtime.</summary>
+    public const string PinDirectoryName = ".pins";
+
     private readonly NativeDvArchiveFetch _fetch;
     private readonly NativeDvArchiveExtract _extract;
 
@@ -295,6 +304,210 @@ public sealed class NativeDvRuntimeStore
             TryDelete(staging);
         }
     }
+
+    /// <summary>Record a generation's own pinned manifest so it can be validated
+    /// later without the shipped descriptor.
+    ///
+    /// A retained previous generation is only a directory of files; on its own
+    /// there is nothing to check it against, because the shipped descriptor pins
+    /// the hashes of a different build. Keeping each generation's manifest means a
+    /// rollback candidate is verified by exactly the code that verified it when it
+    /// was installed, rather than being launched on trust.
+    ///
+    /// The snapshot is written in the pinned manifest schema on purpose: there is
+    /// then one parser and one validator for both, and no second format to keep in
+    /// step. Best-effort, because failing to record this must never fail an
+    /// install that otherwise succeeded.</summary>
+    public bool WriteDescriptorSnapshot(NativeDvRuntimeDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        string? json = ToManifestJson(descriptor);
+        if (json is null) return false;
+        try
+        {
+            string path = DescriptorSnapshotPath(descriptor.VersionId);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            // Re-read the snapshot through the ordinary parser before it counts as
+            // written, so a snapshot that could not be read back is never left
+            // behind to be trusted later.
+            string temporary = path + ".tmp";
+            File.WriteAllText(temporary, json);
+            var reparsed = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(temporary));
+            if (reparsed.VersionId != descriptor.VersionId ||
+                reparsed.LauncherRelativePath != descriptor.LauncherRelativePath ||
+                reparsed.Components.Length != descriptor.Components.Length)
+            {
+                File.Delete(temporary);
+                return false;
+            }
+            File.Move(temporary, path, overwrite: true);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (InvalidDataException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    public string DescriptorSnapshotPath(string generationId) =>
+        Path.Combine(RootPath, DescriptorDirectoryName, generationId + ".json");
+
+    /// <summary>The recorded manifest for a generation, or null when there is none
+    /// or it does not describe that generation.
+    ///
+    /// The identifier must be a generation id and the parsed manifest must pin the
+    /// very generation asked for, so a stray or edited file cannot be used to
+    /// describe a different build.</summary>
+    public NativeDvRuntimeDescriptor? ReadDescriptorSnapshot(string? generationId)
+    {
+        if (!IsGenerationIdentifier(generationId)) return null;
+        try
+        {
+            string path = DescriptorSnapshotPath(generationId!);
+            if (!File.Exists(path)) return null;
+            var descriptor = NativeDvRuntimeDescriptor.FromManifestJson(File.ReadAllText(path));
+            return descriptor.VersionId.Equals(generationId, StringComparison.OrdinalIgnoreCase) ? descriptor : null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (InvalidDataException) { return null; }
+        catch (JsonException) { return null; }
+        catch (UriFormatException) { return null; }
+    }
+
+    /// <summary>Remove recorded manifests for generations that are no longer kept.
+    /// Only well-formed snapshot names are ever considered.</summary>
+    public int CleanupDescriptorSnapshots(IReadOnlySet<string> keep)
+    {
+        ArgumentNullException.ThrowIfNull(keep);
+        string directory = Path.Combine(RootPath, DescriptorDirectoryName);
+        if (!Directory.Exists(directory)) return 0;
+        int removed = 0;
+        foreach (string file in Directory.EnumerateFiles(directory, "*.json"))
+        {
+            string name = Path.GetFileNameWithoutExtension(file);
+            if (!IsGenerationIdentifier(name) || keep.Contains(name)) continue;
+            try { File.Delete(Path.Combine(directory, name + ".json")); removed++; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return removed;
+    }
+
+    /// <summary>Declare a generation in use for as long as the handle lives, so
+    /// cleanup will not touch it.
+    ///
+    /// This exists so a generation cannot be collected out from under a launch:
+    /// between choosing a fallback and starting it, and for as long as it is
+    /// playing. The pin is an exclusively held marker file outside the generation,
+    /// and <see cref="IsPinned"/> is consulted by cleanup before it deletes
+    /// anything.
+    ///
+    /// A marker is used rather than a handle on one of the runtime's own files
+    /// because holding a file only makes a recursive delete fail partway: the
+    /// delete removes whatever it can reach first, so the directory survives with
+    /// its contents gutted, which is worse than either outcome. The generation has
+    /// to be excluded before deletion is attempted, not made to fail during it.
+    /// Holding the launcher is not an option either, since the Windows loader
+    /// needs execute access that a delete-blocking share would refuse.
+    ///
+    /// Because the marker is a real exclusive file handle, it works across
+    /// processes exactly as the provisioning lock does.</summary>
+    public IDisposable? PinGeneration(string? generationId)
+    {
+        if (!IsGenerationIdentifier(generationId)) return null;
+        try
+        {
+            string directory = Path.Combine(RootPath, PinDirectoryName);
+            Directory.CreateDirectory(directory);
+            return new FileStream(Path.Combine(directory, generationId! + ".pin"), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>Whether any process currently holds this generation in use.
+    ///
+    /// Probing is non-destructive: it opens the marker exclusively and releases it
+    /// again, deleting it on close, so a stale marker from a crashed process is
+    /// cleared by the first probe rather than blocking cleanup forever.</summary>
+    public bool IsPinned(string? generationId)
+    {
+        if (!IsGenerationIdentifier(generationId)) return false;
+        string path = Path.Combine(RootPath, PinDirectoryName, generationId! + ".pin");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            using var probe = new FileStream(path, FileMode.Open, FileAccess.ReadWrite,
+                FileShare.None, 1, FileOptions.DeleteOnClose);
+            return false;
+        }
+        catch (IOException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
+    }
+
+    /// <summary>A generation id is the archive SHA-256 and nothing else. This is
+    /// the store's canonical spelling of that rule; the lifecycle defers to it so
+    /// the two layers cannot drift apart.</summary>
+    public static bool IsGenerationIdentifier(string? value) =>
+        value is { Length: 64 } && value.All(Uri.IsHexDigit);
+
+    /// <summary>Re-emit a descriptor in the pinned manifest schema.
+    ///
+    /// Returns null when the descriptor cannot be expressed in that schema, which
+    /// the parser limits to a launcher plus at most one companion. A descriptor
+    /// that would not round-trip is better left unrecorded than recorded
+    /// incompletely, because an incomplete manifest would validate fewer files
+    /// than were actually pinned.
+    ///
+    /// The document is built through the serializer rather than assembled as text,
+    /// so a component path or a provider name can never break out of its own
+    /// string and change the shape of the manifest.</summary>
+    private static string? ToManifestJson(NativeDvRuntimeDescriptor descriptor)
+    {
+        var launcher = descriptor.Components.FirstOrDefault(x => x.RelativePath == descriptor.LauncherRelativePath);
+        if (launcher is null || descriptor.Components.Length is < 1 or > 2) return null;
+        var companion = descriptor.Components.FirstOrDefault(x => x.RelativePath != descriptor.LauncherRelativePath);
+
+        // The parser keeps whatever follows "/extracted/", so that marker has to be
+        // present for a nested component path to survive the round trip.
+        static Dictionary<string, object?> Entry(NativeDvRuntimeComponent component) => new()
+        {
+            ["pathRelativeToManifest"] = "./extracted/" + component.RelativePath.Replace(Path.DirectorySeparatorChar, '/'),
+            ["bytes"] = component.Bytes,
+            ["sha256"] = component.Sha256,
+        };
+
+        var runtime = new Dictionary<string, object?> { ["executable"] = Entry(launcher) };
+        if (companion is not null) runtime["consoleLauncher"] = Entry(companion);
+
+        return JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["schemaVersion"] = 1,
+            ["recordedBy"] = "adaptive-media-runtime-store",
+            ["provider"] = new Dictionary<string, object?>
+            {
+                ["name"] = descriptor.Provider,
+                ["releaseUrl"] = descriptor.ReleaseUrl,
+            },
+            ["archive"] = new Dictionary<string, object?>
+            {
+                ["url"] = descriptor.ArchiveUrl.AbsoluteUri,
+                ["bytes"] = descriptor.ArchiveBytes,
+                ["sha256"] = descriptor.ArchiveSha256,
+            },
+            ["runtime"] = runtime,
+            ["mpv"] = new Dictionary<string, object?>
+            {
+                ["version"] = descriptor.MpvVersion,
+                ["commit"] = descriptor.MpvCommit,
+            },
+            ["libplacebo"] = new Dictionary<string, object?> { ["apiVersion"] = descriptor.LibplaceboApi },
+        }, SnapshotJson);
+    }
+
+    private static readonly JsonSerializerOptions SnapshotJson = new() { WriteIndented = true };
 
     /// <summary>Remove staging generations abandoned by an interrupted install.
     /// Promoted generations are never touched.</summary>
