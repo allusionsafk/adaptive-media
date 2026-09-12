@@ -1,0 +1,29 @@
+name: Improvement proposal
+description: Propose a focused product or engineering improvement.
+title: "[proposal] "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete limitation or user problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the smallest useful change. A finished design is not required.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or examples
+      description: Optional. Include measurements, affected media, or comparable behaviour when useful.
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Constraints
+      description: Note any playback fidelity, compatibility, performance, security, licensing, or packaging constraint.
