@@ -1122,6 +1122,40 @@ try
     Check(sequenceHealth.IsKnownUnhealthy(genA) && sequenceHealth.IsKnownUnhealthy(genB),
         "Both failing generations are recorded for this session");
 
+    // Case 13: a rollback that starts playback but composes nothing is reported
+    // as what it was. Rolling back successfully is not composing successfully,
+    // and the status line must not be readable as a composition claim.
+    string fallbackUncomposedLog = string.Join("\n",
+        "[   0.016][v][mkv] Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track).",
+        "[   0.285][v][vd] Opening decoder hevc",
+        "[   0.286][v][vd] Selected decoder: hevc - HEVC (High Efficiency Video Coding)",
+        "[   0.318][i][vd] Using hardware decoding (d3d11va).",
+        "[   0.280][v][vo/gpu-next/libplacebo] Initialized libplacebo v7.371.0 (API v371)");
+    var rolledBackBaseLayer = NativeDvLogEvidence.Reduce(fallbackUncomposedLog, "mpv v0.41.0-1042-g7e4cb538a", true, "d3d11va");
+    Check(rolledBackBaseLayer.Delivered == NativeDvDelivered.BaseLayerOnly,
+        "A rollback that composes nothing reports base layer only");
+    Check(!rolledBackBaseLayer.Summary.Contains("Full enhancement", StringComparison.OrdinalIgnoreCase),
+        "A rolled-back base-layer result never reads as Full FEL");
+    Check(rolledBackBaseLayer.Degradation.Any(x => x.Contains("base-layer-only")),
+        "A rolled-back base-layer result names the fallback");
+
+    // The runtime is still healthy: it started useful playback. Health and
+    // composition are separate questions and must not contaminate each other.
+    var rolledBackHealth = NativeDvHealthEvaluator.Evaluate(Signals(stop: true));
+    var rolledBackDecision = NativeDvRollbackPolicy.Decide(rolledBackHealth, 1, null);
+    Check(rolledBackDecision.Step == NativeDvNextStep.Finish &&
+          rolledBackDecision.Status == NativeDvPlaybackStatus.RolledBackToPreviousRuntime,
+        "A rollback that started playback finishes and reports the rollback truthfully");
+    Check(!NativeDvPlaybackStatusText.Describe(rolledBackDecision.Status)
+            .Contains("Full enhancement", StringComparison.OrdinalIgnoreCase),
+        "The rollback status line is not a composition claim");
+
+    // And an unknown composition after a rollback stays unknown.
+    var rolledBackUnknown = NativeDvLogEvidence.Reduce("", "mpv v0.41.0-1042-g7e4cb538a", true, "d3d11va");
+    Check(rolledBackUnknown.Delivered == NativeDvDelivered.Unknown &&
+          rolledBackUnknown.FelComposition == DvObservedState.Unknown,
+        "A rollback with no established composition reports unknown, never Full FEL");
+
     // ---------------------------------------------------------------------
     // Rebuilding a plan for another generation.
     // ---------------------------------------------------------------------
