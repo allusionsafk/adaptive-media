@@ -269,7 +269,8 @@ public sealed class NativeDvRuntimeLifecycle
             // In use by this or another process: excluded before any deletion is
             // attempted. Letting the delete run and fail would strip whatever it
             // reached first and leave a gutted directory behind.
-            if (_store.IsPinned(name)) continue;
+            using var deletion = _store.TryAcquireGenerationDeletionLock(name);
+            if (deletion is null) continue;
             // Re-derive the path from the validated name rather than trusting the
             // enumerated string, and require it to sit directly under the root.
             string target = Path.GetFullPath(Path.Combine(root, name));
@@ -310,7 +311,7 @@ public sealed class NativeDvRuntimeLifecycle
     /// is what makes a rollback unable to bounce.
     ///
     /// This reports; it does not promote. Nothing here changes which generation is
-    /// current, and nothing here writes to the store.</summary>
+    /// current, and it never changes lifecycle state or installed components.</summary>
     public NativeDvFallbackCandidate ResolveFallback(string? failedGenerationId,
         IReadOnlyCollection<string>? alreadyAttempted = null, NativeDvHealthMemory? health = null)
     {
@@ -348,6 +349,12 @@ public sealed class NativeDvRuntimeLifecycle
             return new(NativeDvFallbackState.AdapterUnsupported, previous, descriptor, null,
                 $"This build has no verified way to read diagnostics from mpv {descriptor.MpvCommit}, so falling back to it could not report what playback composed.");
 
+        // Selection hashes are also in-use reads. Hold the same lease so GC
+        // cannot partially delete this tree or race between existence and hashing.
+        using var pin = _store.PinGeneration(previous);
+        if (pin is null)
+            return new(NativeDvFallbackState.StructurallyInvalid, previous, descriptor, null,
+                "The retained native runtime could not be protected from cleanup for validation.");
         var resolution = _store.Resolve(descriptor);
         if (!resolution.IsUsable)
             return new(NativeDvFallbackState.StructurallyInvalid, previous, descriptor, null,

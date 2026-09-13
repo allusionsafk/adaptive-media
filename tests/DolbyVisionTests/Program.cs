@@ -1,7 +1,10 @@
 using AdaptiveMedia;
 using System.Text.Json;
+AppDomain.CurrentDomain.UnhandledException += (_, e) => { Console.Error.WriteLine(e.ExceptionObject); Environment.Exit(1); };
+if (await PlaybackRecoveryTests.ChildAsync(args) is int childExit) { Environment.Exit(childExit); return; }
 int checks = 0;
 void Check(bool condition, string message) { checks++; if (!condition) throw new Exception(message); }
+if (args.FirstOrDefault() == "--recovery-tests") { await PlaybackRecoveryTests.RunAsync(Check, args.ElementAtOrDefault(1)); Console.WriteLine($"PASS: {checks} recovery assertions"); return; }
 var video = new MediaInfo(3840, 2160, 23.976, "hevc", "pq", "bt.2020", PixelFormat: "yuv420p10le");
 var mel = new DvSourceInfo(DvDetection.Detected, 7, 6, video, DvCompatibility.Yes, DvEnhancementLayer.Mel, DvRpuStatus.Validated, 10, "Validated fixture facts");
 var fel = mel with { EnhancementLayer = DvEnhancementLayer.Fel };
@@ -1697,8 +1700,8 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
             Check(service.LastNativeObservation.FelComposition == DvObservedState.Active &&
                   service.LastNativeObservation.DecoderInstances >= 2,
                 "ROLLBACK: composition and dual decode are observed on the attempt that actually ran");
-            Check(File.Exists(PlaybackService.NativeFallbackLogPath),
-                "ROLLBACK: the retried attempt wrote its own diagnostic log");
+            Check(nativeAttempts.Select(x => x.Arguments.Single(a => a.StartsWith("--log-file="))).Distinct().Count() == 2,
+                "ROLLBACK: the retried attempt used its own diagnostic log");
             Check(statusLines.Any(x => x.Contains("previous native runtime", StringComparison.OrdinalIgnoreCase)),
                 "ROLLBACK: the user is told the previous runtime was used");
             Check(!statusLines.Any(x => x.Contains("Native runtime healthy", StringComparison.Ordinal)),
@@ -1737,4 +1740,5 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
     }
 }
 
+await PlaybackRecoveryTests.RunAsync(Check);
 Console.WriteLine($"PASS: {checks} total Dolby Vision assertions");

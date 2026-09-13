@@ -282,6 +282,7 @@ public enum NativeDvPlaybackStatus
     PreviousRuntimeUnavailable = 4,
     HealthUnknown = 5,
     MediaOrUserOutcome = 6,
+    RuntimeUnavailable = 7,
 }
 
 /// <summary>What a native attempt's outcome leads to next.</summary>
@@ -361,6 +362,7 @@ public static class NativeDvPlaybackStatusText
         NativeDvPlaybackStatus.PreviousRuntimeUnavailable => "The native runtime failed and no previous native runtime was available; stable playback was used.",
         NativeDvPlaybackStatus.HealthUnknown => "Native runtime health unknown.",
         NativeDvPlaybackStatus.MediaOrUserOutcome => "Native playback ended without a runtime problem.",
+        NativeDvPlaybackStatus.RuntimeUnavailable => "Native runtime unavailable; using stable playback.",
         _ => "Native playback was not used.",
     };
 }

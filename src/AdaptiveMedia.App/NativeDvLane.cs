@@ -252,6 +252,10 @@ public sealed class NativeDvLane
         var resolution = new NativeDvRuntimeResolution(NativeDvRuntimeState.Installed, status.Runtime,
             _store.GenerationPath(_descriptor), null);
 
+        using var pin = _store.PinGeneration(_descriptor.VersionId);
+        if (pin is null)
+            return NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.NotInstalled,
+                "The native runtime could not be protected from cleanup for the source probe.");
         var facts = await NativeDvSourceProbe.ReadAsync(resolution.Runtime!.ExecutablePath, sourcePath, TimeSpan.FromSeconds(30));
         if (!facts.IsProfile7)
             return NativeDvLaneOutcome.NotSelected(NativeDvRuntimeState.Installed,

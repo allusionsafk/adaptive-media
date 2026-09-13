@@ -172,7 +172,12 @@ public sealed class NativeDvRuntimeStore
         string generation = GenerationPath(descriptor);
         if (!Directory.Exists(generation))
             return new(NativeDvRuntimeState.NotInstalled, null, null, "The native Dolby Vision runtime is not installed.");
-        return ValidateTree(descriptor, generation);
+        try { return ValidateTree(descriptor, generation); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return new(NativeDvRuntimeState.Incomplete, null, generation,
+                "The native runtime could not be validated: " + ex.Message);
+        }
     }
 
     private NativeDvRuntimeResolution ValidateTree(NativeDvRuntimeDescriptor descriptor, string tree)
@@ -394,57 +399,52 @@ public sealed class NativeDvRuntimeStore
         return removed;
     }
 
-    /// <summary>Declare a generation in use for as long as the handle lives, so
-    /// cleanup will not touch it.
-    ///
-    /// This exists so a generation cannot be collected out from under a launch:
-    /// between choosing a fallback and starting it, and for as long as it is
-    /// playing. The pin is an exclusively held marker file outside the generation,
-    /// and <see cref="IsPinned"/> is consulted by cleanup before it deletes
-    /// anything.
-    ///
-    /// A marker is used rather than a handle on one of the runtime's own files
-    /// because holding a file only makes a recursive delete fail partway: the
-    /// delete removes whatever it can reach first, so the directory survives with
-    /// its contents gutted, which is worse than either outcome. The generation has
-    /// to be excluded before deletion is attempted, not made to fail during it.
-    /// Holding the launcher is not an option either, since the Windows loader
-    /// needs execute access that a delete-blocking share would refuse.
-    ///
-    /// Because the marker is a real exclusive file handle, it works across
-    /// processes exactly as the provisioning lock does.</summary>
+    /// <summary>Shared lifetime lease on a generation. Every playback owns its
+    /// own handle. Cleanup must acquire the exclusive counterpart before touching
+    /// any runtime file. The marker is persistent: unlinking it would allow a new
+    /// file identity to bypass handles held by another process.</summary>
     public IDisposable? PinGeneration(string? generationId)
+    {
+        if (!IsGenerationIdentifier(generationId)) return null;
+        FileStream? pin = null;
+        try
+        {
+            string directory = Path.Combine(RootPath, PinDirectoryName);
+            Directory.CreateDirectory(directory);
+            pin = new FileStream(Path.Combine(directory, generationId! + ".pin"),
+                FileMode.OpenOrCreate, FileAccess.Read, FileShare.Read);
+            // Check under the lease: GC may have won between selection and pinning.
+            if (Directory.Exists(Path.Combine(RootPath, generationId!))) return pin;
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        pin?.Dispose();
+        return null;
+    }
+
+    /// <summary>Exclusive deletion lease, held for the entire recursive deletion.
+    /// A probe followed by deletion is unsafe: a new player could pin in between.</summary>
+    internal IDisposable? TryAcquireGenerationDeletionLock(string? generationId)
     {
         if (!IsGenerationIdentifier(generationId)) return null;
         try
         {
             string directory = Path.Combine(RootPath, PinDirectoryName);
             Directory.CreateDirectory(directory);
-            return new FileStream(Path.Combine(directory, generationId! + ".pin"), FileMode.OpenOrCreate,
-                FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            return new FileStream(Path.Combine(directory, generationId! + ".pin"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
     }
 
-    /// <summary>Whether any process currently holds this generation in use.
-    ///
-    /// Probing is non-destructive: it opens the marker exclusively and releases it
-    /// again, deleting it on close, so a stale marker from a crashed process is
-    /// cleared by the first probe rather than blocking cleanup forever.</summary>
+    /// <summary>Whether a generation has an active lease. This is informational;
+    /// deletion must hold its own exclusive lease rather than relying on a probe.</summary>
     public bool IsPinned(string? generationId)
     {
         if (!IsGenerationIdentifier(generationId)) return false;
-        string path = Path.Combine(RootPath, PinDirectoryName, generationId! + ".pin");
-        if (!File.Exists(path)) return false;
-        try
-        {
-            using var probe = new FileStream(path, FileMode.Open, FileAccess.ReadWrite,
-                FileShare.None, 1, FileOptions.DeleteOnClose);
-            return false;
-        }
-        catch (IOException) { return true; }
-        catch (UnauthorizedAccessException) { return true; }
+        using var probe = TryAcquireGenerationDeletionLock(generationId);
+        return probe is null;
     }
 
     /// <summary>A generation id is the archive SHA-256 and nothing else. This is

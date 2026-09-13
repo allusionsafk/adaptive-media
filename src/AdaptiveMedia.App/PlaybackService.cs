@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Immutable;
 using System.Text.Json;
 namespace AdaptiveMedia;
 
@@ -9,7 +10,10 @@ public sealed class PlaybackService
     private readonly Dictionary<string, (DateTime Stamp, bool Vpp, string Version)> _capabilities = [];
     private readonly Dictionary<string, (DateTime Stamp, long Length, MediaInfo Media)> _mediaCache = [];
     private readonly Dictionary<string, SessionDiagnostics> _preparedReports = [];
+    private readonly Dictionary<string, NativeSelection> _nativeSelections = [];
     private readonly Dictionary<string, NativeAttempt> _nativeAttempts = [];
+    private sealed record NativeSelection(NativeDvLaneOutcome Outcome, string? GenerationId,
+        string StableExecutable, bool Retained);
 
     /// <summary>What one native playback attempt asked for, and what it went on to
     /// establish. Each attempt owns its own record, so a retry on another
@@ -20,6 +24,7 @@ public sealed class PlaybackService
         public required NativeDvLaneOutcome Outcome { get; init; }
         public required string LogPath { get; init; }
         public required string? GenerationId { get; init; }
+        public bool StopRequested { get; set; }
         public bool IpcConnected { get; set; }
         public bool AdapterSupported { get; set; }
         public bool VideoDecoderObserved { get; set; }
@@ -61,14 +66,10 @@ public sealed class PlaybackService
 
     public static string NativeConfigDirectory => Path.Combine(SettingsStore.DirectoryPath, "native-dv-config");
 
-    /// <summary>The diagnostic log for the first native attempt of a playback.</summary>
+    /// <summary>Planning placeholder; each actual launch gets its own temporary log.</summary>
     public static string NativeLogPath => Path.Combine(DiagnosticsStore.DirectoryPath, "native-dv.log");
 
-    /// <summary>The diagnostic log for a rollback attempt. A separate file, and
-    /// both are removed before their launch, because composition is read from log
-    /// text: if the two attempts shared a file, the failed generation's
-    /// composition line could be read back as the fallback's own evidence and a
-    /// Full FEL result would be inherited rather than observed.</summary>
+    /// <summary>Rollback planning placeholder, replaced by a unique attempt log at launch.</summary>
     public static string NativeFallbackLogPath => Path.Combine(DiagnosticsStore.DirectoryPath, "native-dv-fallback.log");
 
     public async Task<PlaybackPlan> PrepareAsync(IReadOnlyList<string> items, PlaybackOptions options,
@@ -145,7 +146,7 @@ public sealed class PlaybackService
             if (outcome.Selected && outcome.Plan is { Supported: true, Request: not null })
             {
                 string generation = LastNativeLifecycle?.CurrentGeneration ?? "";
-                string nativeLog = NativeLogPath;
+                bool retainedSelection = false;
 
                 // A generation that has already failed repeatedly in this session
                 // starts on the retained fallback instead of failing again first.
@@ -164,7 +165,7 @@ public sealed class PlaybackService
                         {
                             outcome = preferred;
                             generation = demoted.GenerationId ?? generation;
-                            nativeLog = NativeFallbackLogPath;
+                            retainedSelection = true;
                             string note = $"The current native Dolby Vision runtime failed {NativeHealth.FaultCount(LastNativeLifecycle?.CurrentGeneration)} times in this session; starting on the retained previous runtime.";
                             StatusChanged?.Invoke(note);
                             DiagnosticsStore.Event("warning", "native-dv-health", note);
@@ -180,13 +181,10 @@ public sealed class PlaybackService
                      "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts."],
                     nativePipe);
                 if (_preparedReports.Count >= 32) _preparedReports.Clear();
-                if (_nativeAttempts.Count >= 32) _nativeAttempts.Clear();
-                _nativeAttempts[nativePipe] = new NativeAttempt
-                {
-                    Outcome = outcome,
-                    LogPath = nativeLog,
-                    GenerationId = NativeDvRuntimeLifecycle.IsGenerationId(generation) ? generation : null,
-                };
+                if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
+                _nativeSelections[nativePipe] = new(outcome,
+                    NativeDvRuntimeLifecycle.IsGenerationId(generation) ? generation : null, mpv, retainedSelection);
+                LastNativeOutcome = outcome;
                 _preparedReports[nativePipe] = new() { Plan = nativePlan, MpvVersion = outcome.Runtime!.MpvVersion,
                     Summary = nativePlan.Summary, Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens } };
                 return nativePlan;
@@ -205,16 +203,20 @@ public sealed class PlaybackService
 
     public async Task<int> LaunchAsync(PlaybackPlan plan, double? stopAfterSeconds = null)
     {
+        if (plan.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal) &&
+            !_nativeSelections.ContainsKey(plan.PipeName))
+            throw new InvalidOperationException("This native playback plan has expired. Prepare playback again.");
         _preparedReports.TryGetValue(plan.PipeName, out var prepared);
         LastNativeObservation = null;
         LastNativeHealth = null;
+        LastNativeFallback = null;
         LastNativePlaybackStatus = NativeDvPlaybackStatus.NotUsed;
         LastReport = new() { Plan = plan, Summary = plan.Summary, MpvVersion = prepared?.MpvVersion ?? "unknown", Hardware = prepared?.Hardware };
         using var hdrSession = HdrSession.Begin(plan, LastReport);
         DiagnosticsStore.Event("info", "playback-plan", plan.Renderer);
         StatusChanged?.Invoke(plan.Summary);
 
-        if (_nativeAttempts.ContainsKey(plan.PipeName))
+        if (_nativeSelections.ContainsKey(plan.PipeName))
         {
             var native = await RunNativeWithRollbackAsync(plan, stopAfterSeconds);
             if (native.Handled)
@@ -227,6 +229,7 @@ public sealed class PlaybackService
                 catch (IOException) { StatusChanged?.Invoke("Playback ended; diagnostics could not be saved."); }
                 return native.ExitCode;
             }
+            LastNativeObservation = null;
             plan = native.StablePlan!;
             LastReport.Plan = plan;
             StatusChanged?.Invoke(plan.Summary);
@@ -272,20 +275,58 @@ public sealed class PlaybackService
 
         while (true)
         {
-            var attempt = _nativeAttempts[plan.PipeName];
-            if (attempt.GenerationId is not null) attempted.Add(attempt.GenerationId);
-
-            // Each attempt reads its own evidence and nothing else. Removing the
-            // log before launch is what stops a composition line written by a
-            // previous attempt from being read back as this one's own.
-            TryDeleteDiagnosticLog(attempt.LogPath);
+            var selection = _nativeSelections[plan.PipeName];
+            // A prepared plan is reusable; observed state is not. A unique log
+            // also prevents a concurrent session or an undeletable old log from
+            // donating evidence to this launch.
+            string logPath = Path.Combine(DiagnosticsStore.DirectoryPath, "native-dv-" + Guid.NewGuid().ToString("N") + ".log");
+            plan = plan with { Arguments = plan.Arguments.Select(x => x.StartsWith("--log-file=", StringComparison.Ordinal)
+                ? "--log-file=" + logPath : x).ToImmutableArray() };
+            var attempt = new NativeAttempt { Outcome = selection.Outcome,
+                LogPath = logPath, GenerationId = selection.GenerationId };
+            _nativeAttempts[plan.PipeName] = attempt;
+            LastReport!.Plan = plan;
             LastNativeObservation = null;
+            if (attempt.GenerationId is not null) attempted.Add(attempt.GenerationId);
 
             // Hold the generation for the life of the attempt so cleanup, in this
             // process or another, cannot remove it while it is playing.
             using var pin = NativeDolbyVision?.Lifecycle.Store.PinGeneration(attempt.GenerationId);
 
-            var run = await RunOnceAsync(plan, stopAfterSeconds);
+            if (pin is null)
+            {
+                LastNativePlaybackStatus = NativeDvPlaybackStatus.RuntimeUnavailable;
+                Announce("The native generation could not be protected from cleanup; using stable playback.");
+                _nativeAttempts.Remove(plan.PipeName);
+                return new(false, 0, BuildStableFallbackPlan(plan));
+            }
+            // Validate a retained generation again under its lifetime lease. A
+            // prior selection cannot authorize launch after files or identity change.
+            if (selection.Retained)
+            {
+                var store = NativeDolbyVision!.Lifecycle.Store;
+                var descriptor = store.ReadDescriptorSnapshot(attempt.GenerationId);
+                if (descriptor is null || !NativeDvDiagnosticAdapters.SupportsCommit(descriptor.MpvCommit) ||
+                    store.Resolve(descriptor) is not { IsUsable: true, Runtime: not null } resolved ||
+                    !string.Equals(resolved.Runtime.ExecutablePath, plan.Executable, StringComparison.OrdinalIgnoreCase))
+                {
+                    LastNativePlaybackStatus = NativeDvPlaybackStatus.RuntimeUnavailable;
+                    Announce("The retained native generation no longer validates; using stable playback.");
+                    _nativeAttempts.Remove(plan.PipeName);
+                    return new(false, 0, BuildStableFallbackPlan(plan));
+                }
+            }
+            (int ExitCode, bool Started, TimeSpan Lifetime) run;
+            try { run = await RunOnceAsync(plan, stopAfterSeconds); }
+            finally
+            {
+                _nativeAttempts.Remove(plan.PipeName);
+                // The reduced evidence is in the session report; temporary logs
+                // must not accumulate with the number of playback attempts.
+                try { File.Delete(logPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
 
             var verdict = NativeDvHealthEvaluator.Evaluate(new NativeDvHealthSignals
             {
@@ -296,7 +337,7 @@ public sealed class PlaybackService
                 VideoDecoderObserved = attempt.VideoDecoderObserved,
                 VideoOutputConfigured = attempt.VideoOutputConfigured,
                 ObservationAdapterSupported = attempt.AdapterSupported,
-                StopRequested = stopAfterSeconds.HasValue,
+                StopRequested = attempt.StopRequested,
                 ExitCode = run.ExitCode,
                 Lifetime = run.Lifetime,
             });
@@ -319,19 +360,27 @@ public sealed class PlaybackService
 
             var decision = NativeDvRollbackPolicy.Decide(verdict, rollbacks, fallback);
             LastNativePlaybackStatus = decision.Status;
+            if (selection.Retained && decision.Status == NativeDvPlaybackStatus.RuntimeHealthy)
+                LastNativePlaybackStatus = NativeDvPlaybackStatus.RolledBackToPreviousRuntime;
 
             if (decision.Step == NativeDvNextStep.Finish)
             {
-                Announce(NativeDvPlaybackStatusText.Describe(decision.Status));
+                Announce(NativeDvPlaybackStatusText.Describe(LastNativePlaybackStatus));
                 return new(true, run.ExitCode, null);
             }
 
+            if (attempt.Observation is not null)
+            {
+                int observedLine = LastReport!.FallbackHistory.IndexOf(attempt.Observation.Summary);
+                if (observedLine >= 0) LastReport.FallbackHistory[observedLine] =
+                    "Earlier native attempt (ended): " + attempt.Observation.Summary;
+            }
             Announce(verdict.Explanation);
             Announce(decision.Explanation);
 
             if (decision.Step == NativeDvNextStep.UseStablePlayback)
             {
-                Announce(NativeDvPlaybackStatusText.Describe(decision.Status));
+                Announce(NativeDvPlaybackStatusText.Describe(LastNativePlaybackStatus));
                 return new(false, run.ExitCode, BuildStableFallbackPlan(plan));
             }
 
@@ -367,13 +416,8 @@ public sealed class PlaybackService
                  "What this attempt delivers is established from its own evidence, not from the attempt it replaces."],
                 retryPipe);
 
-            if (_nativeAttempts.Count >= 32) _nativeAttempts.Clear();
-            _nativeAttempts[retryPipe] = new NativeAttempt
-            {
-                Outcome = retryOutcome,
-                LogPath = NativeFallbackLogPath,
-                GenerationId = fallback?.GenerationId,
-            };
+            if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
+            _nativeSelections[retryPipe] = new(retryOutcome, fallback?.GenerationId, selection.StableExecutable, true);
             Announce($"Retrying on the retained native runtime {retryDescriptor.MpvVersion}.");
             rollbacks++;
             plan = retryPlan;
@@ -393,22 +437,17 @@ public sealed class PlaybackService
     private PlaybackPlan BuildStableFallbackPlan(PlaybackPlan native)
     {
         string[] items = native.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
-        return PlaybackPlanBuilder.Build(ResolveMpv(), Path.Combine(AppContext.BaseDirectory, "mpv-config"), items,
+        return PlaybackPlanBuilder.Build(_nativeSelections[native.PipeName].StableExecutable, Path.Combine(AppContext.BaseDirectory, "mpv-config"), items,
             native.Requested, native.Source, native.Target, new(false, false),
             "adaptive-media-" + Guid.NewGuid().ToString("N"));
-    }
-
-    private static void TryDeleteDiagnosticLog(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
     }
 
     private async Task<(int ExitCode, bool Started, TimeSpan Lifetime)> RunOnceAsync(PlaybackPlan plan, double? stopAfterSeconds)
     {
         LastReport!.Attempts.Add(plan);
         LastReport.Observed.Clear();
+        LastReport.MpvVersion = "unknown";
+        LastReport.Error = null;
         bool isNative = _nativeAttempts.ContainsKey(plan.PipeName);
         var clock = Stopwatch.StartNew();
         // Launch the exact immutable argument vector; do not probe or rebuild it here.
@@ -462,7 +501,12 @@ public sealed class PlaybackService
                     "interpolation", "audio-out-params", "current-ao", "user-data/adaptive/state" })
                 {
                     var data = await ipc.CommandAsync(["get_property", name], queryTimeout.Token);
-                    if (data.HasValue) LastReport!.Observed[name] = data.Value;
+                    if (data.HasValue)
+                    {
+                        LastReport!.Observed[name] = data.Value;
+                        if (name == "mpv-version" && data.Value.ValueKind == JsonValueKind.String)
+                            LastReport.MpvVersion = data.Value.GetString() ?? "unknown";
+                    }
                 }
                 if (plan.Requested.MotionMode != "Off" && LastReport!.Observed.TryGetValue("video-sync", out var sync) && sync.ValueKind == JsonValueKind.String && sync.GetString() == "audio")
                 {
@@ -517,7 +561,12 @@ public sealed class PlaybackService
                 }
                 if (LastReport!.Observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
                     StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString());
-                if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds) { await ipc.CommandAsync(["quit"], queryTimeout.Token); return; }
+                if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds)
+                {
+                    bool stopped = await ipc.CommandSucceededAsync(["quit"], queryTimeout.Token);
+                    if (attempt is not null) attempt.StopRequested = stopped;
+                    return;
+                }
                 await Task.Delay(1000, cancellation);
             }
         }
