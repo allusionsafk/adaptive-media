@@ -26,6 +26,9 @@ try {
     Invoke-Gate 'Settings assertions' {
         dotnet run --project tests/SettingsTests/SettingsTests.csproj -c Release
     }
+    Invoke-Gate 'Public identity assertions' {
+        & (Join-Path $root 'tests/Test-PublicIdentity.ps1')
+    }
     Invoke-Gate 'Dolby Vision semantic assertions' {
         dotnet run --project tests/DolbyVisionTests/DolbyVisionTests.csproj -c Release
     }
