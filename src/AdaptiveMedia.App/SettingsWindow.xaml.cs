@@ -15,6 +15,8 @@ public partial class SettingsWindow : Window
         FullscreenCheck.IsChecked = settings.FullscreenExternal;
         BitstreamCheck.IsChecked = settings.HdmiBitstream;
         MpcCheck.IsChecked = settings.MpcFallback;
+        NativeDvCheck.IsChecked = settings.NativeDolbyVisionLane;
+        NativeDvDownloadCheck.IsChecked = settings.AllowNativeDolbyVisionDownload;
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
@@ -24,6 +26,8 @@ public partial class SettingsWindow : Window
         ResultSettings.FullscreenExternal = FullscreenCheck.IsChecked == true;
         ResultSettings.HdmiBitstream = BitstreamCheck.IsChecked == true;
         ResultSettings.MpcFallback = MpcCheck.IsChecked == true;
+        ResultSettings.NativeDolbyVisionLane = NativeDvCheck.IsChecked == true;
+        ResultSettings.AllowNativeDolbyVisionDownload = NativeDvDownloadCheck.IsChecked == true;
         DialogResult = true;
     }
 }

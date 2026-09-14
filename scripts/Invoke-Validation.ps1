@@ -41,6 +41,9 @@ try {
     Invoke-Gate 'Standalone repository layout' {
         & (Join-Path $root 'scripts/Test-RepositoryLayout.ps1')
     }
+    Invoke-Gate 'Native Dolby Vision experiment contract' {
+        & (Join-Path $root 'tests/Test-NativeDvExperiment.ps1')
+    }
     Invoke-Gate 'Dolby Vision real execution' {
         & (Join-Path $root 'tests/Run-DolbyVisionExecutionTests.ps1')
     }

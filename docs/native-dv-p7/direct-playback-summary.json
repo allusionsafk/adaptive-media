@@ -1,0 +1,483 @@
+{
+  "SchemaVersion": 1,
+  "IntegrationGate": "supported",
+  "FailedChecks": [],
+  "Runtime": {
+    "MpvVersion": "0.41.0-1042-g7e4cb538a",
+    "MpvCommit": "7e4cb538a3f30d25920ad8e87ba6571540fb729f",
+    "FelMergeCommit": "99b4c12cccb4d8d3f72b41944cb6c640e2156650",
+    "CommitsAfterFelMerge": 196,
+    "FfmpegVersion": "N-126482-g903325e27",
+    "LibplaceboVersion": "7.371.0",
+    "LibplaceboApi": 371,
+    "ExecutableSha256": "b3c7e71e43ba37ba5dfd455ff61715c9dfe3b8ee73564a901257c038f78c9eb5",
+    "ConsoleLauncherSha256": "7b0d096c8806122433b17758722bb323d09b62be98346907f6137e91fe414b08",
+    "Provider": "zhongfly/mpv-winbuild",
+    "ReleaseTag": "2026-09-09-7e4cb538a3",
+    "StableRuntimeIsolatedFrom": "C:/mpv/mpv.exe"
+  },
+  "Checks": {
+    "Execution": {
+      "Profile7SplitterObserved": true,
+      "TwoDecoderInstancesObserved": true,
+      "BlElPairingActive": true,
+      "RpuPresent": true,
+      "FelCompositionActive": true,
+      "HardwareSurfacesActive": true,
+      "NoDegradationReported": true,
+      "ControlRunAgreesWithPrimary": true,
+      "FelOffSuppressesComposition": true
+    },
+    "Rendered": {
+      "ControlIsPixelIdentical": true,
+      "AbTimestampsMatch": true,
+      "AbDiffersAtSameTimestamp": true,
+      "AbCaptureHashesDiffer": true
+    },
+    "Scratch": {
+      "FelOnZeroMediaScratch": true,
+      "FelOffZeroMediaScratch": true,
+      "ControlZeroMediaScratch": true,
+      "SourceUnmodified": true
+    }
+  },
+  "RenderedComparison": {
+    "Control": {
+      "Description": "Two FEL-on runs, identical configuration, same authored timestamp.",
+      "ChangedPixelCount": 0,
+      "PixelCount": 921600,
+      "MaximumChannelDelta": 0
+    },
+    "EnhancementLayerAb": {
+      "Description": "FEL-on against FEL-off, identical configuration, same authored timestamp.",
+      "ChangedPixelCount": 889197,
+      "PixelCount": 921600,
+      "ChangedPixelFraction": 0.9648404947916667,
+      "MaximumChannelDelta": 2242,
+      "SampleMaximum": 65535,
+      "MeanAbsoluteChannelError": 111.3899681712963,
+      "BoundingBox": {
+        "Left": 0,
+        "Top": 0,
+        "Right": 1279,
+        "Bottom": 719
+      }
+    }
+  },
+  "Runs": {
+    "FelOn": {
+      "RunId": "proof2-fel-on-a",
+      "RequestedEnhancementLayer": true,
+      "PipelineState": {
+        "SchemaVersion": 1,
+        "Requested": {
+          "SourcePath": "C:\\Users\\jidan\\Downloads\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi.H265-BTM\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi[Ben The Men].mkv",
+          "SourceClassification": "FEL",
+          "NativeProfile7Playback": true,
+          "EnhancementLayer": true,
+          "RuntimeExecutable": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runtime\\b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5\\extracted\\mpv.com",
+          "Renderer": "gpu-next",
+          "GpuApi": "d3d11",
+          "GpuContext": "d3d11",
+          "HardwareDecoder": "d3d11va"
+        },
+        "Observed": {
+          "RendererObserved": true,
+          "Renderer": "gpu-next",
+          "GraphicsApi": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "GraphicsContext": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "LibplaceboApi": 371,
+          "Profile7Splitter": true,
+          "DecoderInstances": 2,
+          "BlDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "ElDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "BlElPairing": "Active",
+          "BlElPairFormat": "3840x2160 d3d11[p010] dolbyvision/bt.2020/pq/limited/display CL=uhd crop=3840x2160+0+0 A=none",
+          "RpuState": "Present",
+          "FelComposition": "Active",
+          "HardwareSurfaces": "Active",
+          "HardwareDecoderInUse": "d3d11va",
+          "HwdecCurrent": "d3d11va",
+          "HwdecInteropProbeFailures": 3,
+          "MediaScratchBytes": 0,
+          "BoundedStateBytes": 6458007,
+          "UnknownWriteBytes": 0,
+          "ProcessWriteBytes": 6414924,
+          "Degradation": []
+        }
+      },
+      "ZeroMediaScratch": {
+        "Result": "Zero",
+        "SnapshotClean": true,
+        "ProcessCounterClean": true,
+        "MediaPayloadBytes": 0,
+        "MediaPayloadCount": 0,
+        "UnknownCount": 0,
+        "ProcessWriteBytes": 6414924,
+        "ProcessWriteCeilingBytes": 33554432,
+        "Reasons": []
+      },
+      "Capture": {
+        "Path": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runs\\proof2-fel-on-a\\captures\\enhancement-yes.png",
+        "Bytes": 3549612,
+        "Sha256": "1b0b69d0b72ed5c17fe6e6e2436b93c68b3f4dc05826b3d3891e5af29d581711",
+        "RequestedTimestamp": 300.0,
+        "ObservedTimestamp": 300.011,
+        "Mode": "window"
+      },
+      "SourceIdentityMatchesAfterRun": true,
+      "StartupToFirstVideoParamsMs": 2249,
+      "Seeks": {
+        "Count": 6,
+        "AllWithinTolerance": true,
+        "RecoveryMillisecondsMinimum": 58,
+        "RecoveryMillisecondsMaximum": 221
+      },
+      "Frames": {
+        "DroppedFrames": 0,
+        "DecoderDroppedFrames": 0,
+        "VoDelayedFrames": 0,
+        "ContainerFps": 23.976025,
+        "DisplayFps": 240.0
+      },
+      "Memory": {
+        "WorkingSetBytes": {
+          "Minimum": 420634624,
+          "Maximum": 591613952,
+          "First": 560455680,
+          "Last": 583405568,
+          "GrowthFirstToLast": 22949888
+        },
+        "PrivateBytes": {
+          "Minimum": 1696296960,
+          "Maximum": 1888022528,
+          "First": 1853370368,
+          "Last": 1868001280,
+          "GrowthFirstToLast": 14630912
+        },
+        "ProcessGpuDedicatedBytes": {
+          "Minimum": 1314394112,
+          "Maximum": 1322635264,
+          "First": 1314701312,
+          "Last": 1322635264,
+          "GrowthFirstToLast": 7933952
+        },
+        "ProcessGpuSharedBytes": {
+          "Minimum": 135159808,
+          "Maximum": 292626432,
+          "First": 277520384,
+          "Last": 292626432,
+          "GrowthFirstToLast": 15106048
+        }
+      },
+      "Io": {
+        "ReadTransferBytes": {
+          "Minimum": 30993497,
+          "Maximum": 548017018,
+          "First": 30993497,
+          "Last": 548017018,
+          "GrowthFirstToLast": 517023521
+        },
+        "WriteTransferBytes": {
+          "Minimum": 377666,
+          "Maximum": 6397872,
+          "First": 377666,
+          "Last": 6397872,
+          "GrowthFirstToLast": 6020206
+        }
+      },
+      "Utilisation": {
+        "CpuPercentOfAllLogicalProcessors": 0.2318,
+        "LogicalProcessors": 32,
+        "SustainedVideoDecodePercentMean": 24.948,
+        "SustainedThreeDPercentMean": 35.341
+      }
+    },
+    "FelOnControl": {
+      "RunId": "proof2-fel-on-b",
+      "RequestedEnhancementLayer": true,
+      "PipelineState": {
+        "SchemaVersion": 1,
+        "Requested": {
+          "SourcePath": "C:\\Users\\jidan\\Downloads\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi.H265-BTM\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi[Ben The Men].mkv",
+          "SourceClassification": "FEL",
+          "NativeProfile7Playback": true,
+          "EnhancementLayer": true,
+          "RuntimeExecutable": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runtime\\b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5\\extracted\\mpv.com",
+          "Renderer": "gpu-next",
+          "GpuApi": "d3d11",
+          "GpuContext": "d3d11",
+          "HardwareDecoder": "d3d11va"
+        },
+        "Observed": {
+          "RendererObserved": true,
+          "Renderer": "gpu-next",
+          "GraphicsApi": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "GraphicsContext": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "LibplaceboApi": 371,
+          "Profile7Splitter": true,
+          "DecoderInstances": 2,
+          "BlDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "ElDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "BlElPairing": "Active",
+          "BlElPairFormat": "3840x2160 d3d11[p010] dolbyvision/bt.2020/pq/limited/display CL=uhd crop=3840x2160+0+0 A=none",
+          "RpuState": "Present",
+          "FelComposition": "Active",
+          "HardwareSurfaces": "Active",
+          "HardwareDecoderInUse": "d3d11va",
+          "HwdecCurrent": "d3d11va",
+          "HwdecInteropProbeFailures": 3,
+          "MediaScratchBytes": 0,
+          "BoundedStateBytes": 6449703,
+          "UnknownWriteBytes": 0,
+          "ProcessWriteBytes": 6406966,
+          "Degradation": []
+        }
+      },
+      "ZeroMediaScratch": {
+        "Result": "Zero",
+        "SnapshotClean": true,
+        "ProcessCounterClean": true,
+        "MediaPayloadBytes": 0,
+        "MediaPayloadCount": 0,
+        "UnknownCount": 0,
+        "ProcessWriteBytes": 6406966,
+        "ProcessWriteCeilingBytes": 33554432,
+        "Reasons": []
+      },
+      "Capture": {
+        "Path": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runs\\proof2-fel-on-b\\captures\\enhancement-yes.png",
+        "Bytes": 3549612,
+        "Sha256": "1b0b69d0b72ed5c17fe6e6e2436b93c68b3f4dc05826b3d3891e5af29d581711",
+        "RequestedTimestamp": 300.0,
+        "ObservedTimestamp": 300.011,
+        "Mode": "window"
+      },
+      "SourceIdentityMatchesAfterRun": true,
+      "StartupToFirstVideoParamsMs": 1687,
+      "Seeks": {
+        "Count": 6,
+        "AllWithinTolerance": true,
+        "RecoveryMillisecondsMinimum": 60,
+        "RecoveryMillisecondsMaximum": 166
+      },
+      "Frames": {
+        "DroppedFrames": 0,
+        "DecoderDroppedFrames": 0,
+        "VoDelayedFrames": 0,
+        "ContainerFps": 23.976025,
+        "DisplayFps": 240.0
+      },
+      "Memory": {
+        "WorkingSetBytes": {
+          "Minimum": 404676608,
+          "Maximum": 575528960,
+          "First": 543924224,
+          "Last": 566575104,
+          "GrowthFirstToLast": 22650880
+        },
+        "PrivateBytes": {
+          "Minimum": 1707253760,
+          "Maximum": 1892163584,
+          "First": 1856274432,
+          "Last": 1870532608,
+          "GrowthFirstToLast": 14258176
+        },
+        "ProcessGpuDedicatedBytes": {
+          "Minimum": 1314701312,
+          "Maximum": 1322651648,
+          "First": 1314701312,
+          "Last": 1322651648,
+          "GrowthFirstToLast": 7950336
+        },
+        "ProcessGpuSharedBytes": {
+          "Minimum": 135094272,
+          "Maximum": 292364288,
+          "First": 277520384,
+          "Last": 292364288,
+          "GrowthFirstToLast": 14843904
+        }
+      },
+      "Io": {
+        "ReadTransferBytes": {
+          "Minimum": 30904628,
+          "Maximum": 549503894,
+          "First": 30904628,
+          "Last": 549503894,
+          "GrowthFirstToLast": 518599266
+        },
+        "WriteTransferBytes": {
+          "Minimum": 377692,
+          "Maximum": 6389926,
+          "First": 377692,
+          "Last": 6389926,
+          "GrowthFirstToLast": 6012234
+        }
+      },
+      "Utilisation": {
+        "CpuPercentOfAllLogicalProcessors": 0.2157,
+        "LogicalProcessors": 32,
+        "SustainedVideoDecodePercentMean": 17.215,
+        "SustainedThreeDPercentMean": 15.124
+      }
+    },
+    "FelOff": {
+      "RunId": "proof2-fel-off",
+      "RequestedEnhancementLayer": false,
+      "PipelineState": {
+        "SchemaVersion": 1,
+        "Requested": {
+          "SourcePath": "C:\\Users\\jidan\\Downloads\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi.H265-BTM\\The.Mandalorian.And.Grogu.2026.2160p.UHD.BluRay.REMUX.DV.P7.HDR.MULTi[Ben The Men].mkv",
+          "SourceClassification": "Unknown",
+          "NativeProfile7Playback": true,
+          "EnhancementLayer": false,
+          "RuntimeExecutable": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runtime\\b84ab4721365118925c052c87b4e9c940444ef266be3ee7999ddcb847c11a7c5\\extracted\\mpv.com",
+          "Renderer": "gpu-next",
+          "GpuApi": "d3d11",
+          "GpuContext": "d3d11",
+          "HardwareDecoder": "d3d11va"
+        },
+        "Observed": {
+          "RendererObserved": true,
+          "Renderer": "gpu-next",
+          "GraphicsApi": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "GraphicsContext": {
+            "name": "d3d11",
+            "enabled": true,
+            "params": {}
+          },
+          "LibplaceboApi": 371,
+          "Profile7Splitter": true,
+          "DecoderInstances": 2,
+          "BlDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "ElDecoder": "hevc - HEVC (High Efficiency Video Coding)",
+          "BlElPairing": "Active",
+          "BlElPairFormat": "3840x2160 d3d11[p010] dolbyvision/bt.2020/pq/limited/display CL=uhd crop=3840x2160+0+0 A=none",
+          "RpuState": "Present",
+          "FelComposition": "Inactive",
+          "HardwareSurfaces": "Active",
+          "HardwareDecoderInUse": "d3d11va",
+          "HwdecCurrent": "d3d11va",
+          "HwdecInteropProbeFailures": 3,
+          "MediaScratchBytes": 0,
+          "BoundedStateBytes": 5837691,
+          "UnknownWriteBytes": 0,
+          "ProcessWriteBytes": 5795100,
+          "Degradation": []
+        }
+      },
+      "ZeroMediaScratch": {
+        "Result": "Zero",
+        "SnapshotClean": true,
+        "ProcessCounterClean": true,
+        "MediaPayloadBytes": 0,
+        "MediaPayloadCount": 0,
+        "UnknownCount": 0,
+        "ProcessWriteBytes": 5795100,
+        "ProcessWriteCeilingBytes": 33554432,
+        "Reasons": []
+      },
+      "Capture": {
+        "Path": "C:\\Users\\jidan\\AppData\\Local\\AdaptiveMediaDev\\native-zero-disk-dv-p7\\.artifacts\\native-dv\\runs\\proof2-fel-off\\captures\\enhancement-no.png",
+        "Bytes": 3525899,
+        "Sha256": "17991e8aff1cbc7422198744bdea495e7a3f1f1eac81414d72d71aaf9bc29128",
+        "RequestedTimestamp": 300.0,
+        "ObservedTimestamp": 300.011,
+        "Mode": "window"
+      },
+      "SourceIdentityMatchesAfterRun": true,
+      "StartupToFirstVideoParamsMs": 1626,
+      "Seeks": {
+        "Count": 6,
+        "AllWithinTolerance": true,
+        "RecoveryMillisecondsMinimum": 58,
+        "RecoveryMillisecondsMaximum": 161
+      },
+      "Frames": {
+        "DroppedFrames": 0,
+        "DecoderDroppedFrames": 0,
+        "VoDelayedFrames": 0,
+        "ContainerFps": 23.976025,
+        "DisplayFps": 240.0
+      },
+      "Memory": {
+        "WorkingSetBytes": {
+          "Minimum": 399503360,
+          "Maximum": 564822016,
+          "First": 542498816,
+          "Last": 564822016,
+          "GrowthFirstToLast": 22323200
+        },
+        "PrivateBytes": {
+          "Minimum": 1680297984,
+          "Maximum": 1866940416,
+          "First": 1832394752,
+          "Last": 1847332864,
+          "GrowthFirstToLast": 14938112
+        },
+        "ProcessGpuDedicatedBytes": {
+          "Minimum": 1291436032,
+          "Maximum": 1299378176,
+          "First": 1291436032,
+          "Last": 1299378176,
+          "GrowthFirstToLast": 7942144
+        },
+        "ProcessGpuSharedBytes": {
+          "Minimum": 134283264,
+          "Maximum": 291471360,
+          "First": 277078016,
+          "Last": 291471360,
+          "GrowthFirstToLast": 14393344
+        }
+      },
+      "Io": {
+        "ReadTransferBytes": {
+          "Minimum": 30904628,
+          "Maximum": 549503892,
+          "First": 30904628,
+          "Last": 549503892,
+          "GrowthFirstToLast": 518599264
+        },
+        "WriteTransferBytes": {
+          "Minimum": 284800,
+          "Maximum": 5778049,
+          "First": 284800,
+          "Last": 5778049,
+          "GrowthFirstToLast": 5493249
+        }
+      },
+      "Utilisation": {
+        "CpuPercentOfAllLogicalProcessors": 0.2409,
+        "LogicalProcessors": 32,
+        "SustainedVideoDecodePercentMean": 24.696,
+        "SustainedThreeDPercentMean": 19.885
+      }
+    }
+  },
+  "Limitations": [
+    "Composition, BL/EL pairing, and the Profile 7 splitter are observed through this pinned build's diagnostic log. mpv exposes no structured IPC property for them, so those three observations are version-pinned to the manifest runtime.",
+    "The deterministic capture is a 1280x720 window screenshot of the rendered output, not a 3840x2160 frame dump. It proves that enabling the enhancement layer changes rendered pixels; it does not quantify the contribution at native resolution.",
+    "The A/B comparison covers one authored timestamp with confirmed non-trivial NLQ metadata. It is not a whole-title fidelity measurement.",
+    "Process write-byte counters bound writes by the mpv process. Writes by any other process are outside that bound and are covered only by the run-directory snapshot."
+  ]
+}

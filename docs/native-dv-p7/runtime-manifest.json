@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "selectedAtUtc": "2026-09-12T00:00:00Z",
+  "provider": {
+    "name": "zhongfly/mpv-winbuild",
+    "releaseTag": "2026-09-11-14f2d48cbc",
+    "releaseUrl": "https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-09-11-14f2d48cbc",
+    "buildUrl": "https://github.com/zhongfly/mpv-winbuild/actions/runs/34596774006",
+    "publishedAtUtc": "2026-09-11T12:43:50Z"
+  },
+  "archive": {
+    "name": "mpv-x86_64-20260911-git-14f2d48cbc.7z",
+    "url": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-09-11-14f2d48cbc/mpv-x86_64-20260911-git-14f2d48cbc.7z",
+    "bytes": 32714614,
+    "sha256": "031b7a48bbe28b2394d0bfd095e8544bc79ded63fb06b56425833a3ccf30542a",
+    "publisherDigest": "sha256:031b7a48bbe28b2394d0bfd095e8544bc79ded63fb06b56425833a3ccf30542a",
+    "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/031b7a48bbe28b2394d0bfd095e8544bc79ded63fb06b56425833a3ccf30542a/mpv-x86_64-20260911-git-14f2d48cbc.7z"
+  },
+  "runtime": {
+    "executable": {
+      "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/031b7a48bbe28b2394d0bfd095e8544bc79ded63fb06b56425833a3ccf30542a/extracted/mpv.exe",
+      "bytes": 119698432,
+      "sha256": "b3e4c37a7371cf14d0b2c2c0ff6787ef0f9ca07391df2a5bc4d485936a882bbd"
+    },
+    "consoleLauncher": {
+      "pathRelativeToManifest": "../../.artifacts/native-dv/runtime/031b7a48bbe28b2394d0bfd095e8544bc79ded63fb06b56425833a3ccf30542a/extracted/mpv.com",
+      "bytes": 3584,
+      "sha256": "0351ec3719343fed791d4df71f0b7ad6ad58225126ee20f6f9756751a357c159"
+    }
+  },
+  "mpv": {
+    "version": "0.41.0-1044-g14f2d48cb",
+    "commit": "14f2d48cbc7dda61adb4bd181e107a1f3f76e533",
+    "builtAtUtc": "2026-09-11T12:32:45Z",
+    "felMergeCommit": "99b4c12cccb4d8d3f72b41944cb6c640e2156650",
+    "commitsAfterFelMerge": 198,
+    "previousPinnedCommit": "7e4cb538a3f30d25920ad8e87ba6571540fb729f"
+  },
+  "ffmpeg": {
+    "version": "N-126497-g5b614efc7",
+    "commit": "5b614efc7",
+    "libavcodec": "63.11.101",
+    "libavformat": "63.6.100",
+    "doviSplitSourcePresent": true,
+    "matroskaLayeredVideoSourcePresent": true
+  },
+  "libplacebo": {
+    "version": "7.371.0",
+    "commit": "3330a515d62139259c26239014f286e233bd3a5c",
+    "apiVersion": 371,
+    "requiredApiVersion": 370
+  },
+  "featureProbes": {
+    "gpuNextCompiled": true,
+    "d3d11Compiled": true,
+    "vulkanCompiled": true,
+    "d3d11vaHevcListed": true,
+    "formatEnhancementLayerOption": true,
+    "profile7SplitterObserved": true,
+    "virtualDependentElStreamObserved": true,
+    "twoHevcDecodersObserved": true,
+    "elPairFilterObserved": true,
+    "libplaceboCompositionObserved": true,
+    "compositionSuppressedWhenLayerDisabled": true,
+    "notes": "Verified against the authored Profile 7 source on 2026-09-12: sh_dovi_compose_nlq present with enhancement-layer=yes and absent with enhancement-layer=no, at debug log level, with two HEVC decoders and [vf] [el_pair] in both cases."
+  },
+  "isolationContract": {
+    "absoluteRuntimeOnly": true,
+    "noConfig": true,
+    "cacheOnDisk": false,
+    "gpuShaderCache": false,
+    "explicitConfigDirectory": true,
+    "explicitDemuxerCacheDirectory": true,
+    "explicitGpuShaderCacheDirectory": true,
+    "explicitWatchLaterDirectory": true,
+    "savePositionOnQuit": false,
+    "isolatedTempEnvironment": true
+  },
+  "stableRuntimeBeforeProbe": {
+    "path": "C:/mpv/mpv.exe",
+    "version": "0.41.0-1011-g182fa6ca4",
+    "bytes": 123145216,
+    "sha256": "20f742a74f07b641a272ce5c521937c74aae3791b394fb069fe548f67d32b715",
+    "lastWriteTimeUtc": "2026-08-28T00:52:38.1690232Z"
+  }
+}

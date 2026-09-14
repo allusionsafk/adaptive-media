@@ -18,7 +18,13 @@ public sealed class MpvIpc : IAsyncDisposable
         _reader = new StreamReader(_pipe, Encoding.UTF8, false, 4096, true);
         _writer = new StreamWriter(_pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
     }
-    public async Task<JsonElement?> CommandAsync(object[] command, CancellationToken token)
+    public async Task<JsonElement?> CommandAsync(object[] command, CancellationToken token) =>
+        (await SendAsync(command, token)).Data;
+
+    public async Task<bool> CommandSucceededAsync(object[] command, CancellationToken token) =>
+        (await SendAsync(command, token)).Success;
+
+    private async Task<(bool Success, JsonElement? Data)> SendAsync(object[] command, CancellationToken token)
     {
         int id = ++_id;
         if (_writer is null || _reader is null) throw new InvalidOperationException("Connect IPC before sending commands.");
@@ -28,7 +34,10 @@ public sealed class MpvIpc : IAsyncDisposable
             using var json = JsonDocument.Parse(line);
             var root = json.RootElement;
             if (root.TryGetProperty("request_id", out var reply) && reply.GetInt32() == id)
-                return root.GetProperty("error").GetString() == "success" && root.TryGetProperty("data", out var data) ? data.Clone() : null;
+            {
+                bool success = root.GetProperty("error").GetString() == "success";
+                return (success, success && root.TryGetProperty("data", out var data) ? data.Clone() : null);
+            }
         }
         throw new EndOfStreamException("Player closed its diagnostics connection.");
     }
