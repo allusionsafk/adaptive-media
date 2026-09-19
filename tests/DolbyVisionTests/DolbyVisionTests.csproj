@@ -17,6 +17,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackService.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealthMonitor.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackRecovery.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SessionDiagnostics.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/HdrSession.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/NativeDisplay.cs" />

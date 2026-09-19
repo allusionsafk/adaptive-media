@@ -39,6 +39,10 @@ public enum SustainedPlaybackHealth
     RuntimeFailure = 9,
     /// <summary>Playback ended without enough evidence to say how.</summary>
     Unknown = 10,
+    /// <summary>DemiMedia itself stopped the player to recover from a hard
+    /// failure. Never a user stop; the failure that caused it is the attempt's
+    /// worst condition.</summary>
+    RecoveryStopped = 11,
 }
 
 /// <summary>What the player was doing at the latest sample. Context, not health:
@@ -97,6 +101,12 @@ public sealed record PlaybackHealthPolicy
     public TimeSpan ProgressToClearStall { get; init; } = TimeSpan.FromSeconds(3);
     /// <summary>A last observed position this close to the duration counts as the end.</summary>
     public double EndToleranceSeconds { get; init; } = 2.5;
+    /// <summary>A recovery resumes this far before the last confirmed position:
+    /// replaying a little is better than skipping anything.</summary>
+    public double ResumeRewindSeconds { get; init; } = 3;
+    /// <summary>How long a player being stopped for recovery gets to exit on its
+    /// own before only that exact process is terminated.</summary>
+    public TimeSpan RecoveryStopGrace { get; init; } = TimeSpan.FromSeconds(3);
     /// <summary>Largest believable forward jump per second of elapsed time; a
     /// larger one is a discontinuity (seek or file change), not progress.</summary>
     public double MaximumPlausibleSpeed { get; init; } = 16;
@@ -142,6 +152,9 @@ public sealed record PlaybackEnd
     /// <summary>The reason from the player's last end-file event, when one was
     /// received (eof, stop, quit, error, redirect).</summary>
     public string? EndFileReason { get; init; }
+    /// <summary>DemiMedia stopped this player to recover from a hard failure.
+    /// Decided before everything else, and never read as a user stop.</summary>
+    public bool RecoveryStop { get; init; }
 }
 
 public sealed record PlaybackHealthTransition(TimeSpan At, SustainedPlaybackHealth From,
@@ -169,6 +182,10 @@ public sealed record PlaybackHealthSnapshot
     public int SamplesAccepted { get; init; }
     public int SamplesRejected { get; init; }
     public int Discontinuities { get; init; }
+    /// <summary>Where a replacement attempt may resume: the last position this
+    /// attempt confirmed by forward progress, rewound slightly and clamped to the
+    /// duration. Null when no progress was ever confirmed.</summary>
+    public double? ResumePosition { get; init; }
     public IReadOnlyList<PlaybackHealthTransition> Transitions { get; init; } = [];
     public bool IsTerminal => PlaybackHealthClassifier.IsTerminal(State);
 }
@@ -221,6 +238,7 @@ public sealed class PlaybackHealthClassifier
     private int _pressureEpisodes, _degradationEpisodes, _stallEpisodes, _freezeEpisodes;
     private long _outputDrops, _decoderDrops, _timingEvents;
     private int _windows, _accepted, _rejected, _discontinuities;
+    private double? _confirmedPosition;
 
     public PlaybackHealthClassifier(long attemptId, PlaybackHealthPolicy? policy = null)
     {
@@ -233,7 +251,7 @@ public sealed class PlaybackHealthClassifier
 
     public static bool IsTerminal(SustainedPlaybackHealth state) => state is SustainedPlaybackHealth.EndedNormally or
         SustainedPlaybackHealth.UserStopped or SustainedPlaybackHealth.SourceFailure or
-        SustainedPlaybackHealth.RuntimeFailure or SustainedPlaybackHealth.Unknown;
+        SustainedPlaybackHealth.RuntimeFailure or SustainedPlaybackHealth.Unknown or SustainedPlaybackHealth.RecoveryStopped;
 
     /// <summary>Feed one sample. Returns the latest transition it caused, if any.</summary>
     public PlaybackHealthTransition? Observe(PlaybackHealthSample sample)
@@ -335,6 +353,7 @@ public sealed class PlaybackHealthClassifier
         SamplesAccepted = _accepted,
         SamplesRejected = _rejected,
         Discontinuities = _discontinuities,
+        ResumePosition = ResumePosition(),
         Transitions = _transitions.ToArray(),
     };
 
@@ -342,6 +361,10 @@ public sealed class PlaybackHealthClassifier
     {
         if (!end.ProcessStarted)
             return (SustainedPlaybackHealth.RuntimeFailure, "The player could not be started.");
+        // A recovery stop may end in a forced termination; that exit code says
+        // nothing new, and it must never read as the user having stopped.
+        if (end.RecoveryStop)
+            return (SustainedPlaybackHealth.RecoveryStopped, "DemiMedia stopped the player to recover playback.");
         // A stop this application asked for is decided before the exit code: a
         // player told to quit may still exit untidily.
         if (end.StopRequested)
@@ -362,6 +385,17 @@ public sealed class PlaybackHealthClassifier
         if (!_progressed || _lastAnswered is null)
             return (SustainedPlaybackHealth.Unknown, "Playback ended before enough was observed to say how.");
         return (SustainedPlaybackHealth.UserStopped, "The player was closed before the end of the media.");
+    }
+
+    /// <summary>Only a position confirmed by forward progress while playing can be
+    /// a resume point: never a seek target, a jump, or a value read from another
+    /// attempt (those samples are rejected before they get here).</summary>
+    private double? ResumePosition()
+    {
+        if (_confirmedPosition is not double confirmed) return null;
+        double resume = Math.Max(0, confirmed - _policy.ResumeRewindSeconds);
+        if (_lastAnswered?.Duration is double d && d > 0) resume = Math.Min(resume, Math.Max(0, d - _policy.ResumeRewindSeconds));
+        return resume;
     }
 
     private bool ReachedEnd()
@@ -403,6 +437,7 @@ public sealed class PlaybackHealthClassifier
         if (position - _anchorPosition.Value >= _policy.ProgressEpsilonSeconds)
         {
             _anchorPosition = position;
+            _confirmedPosition = position;
             _lastProgressAt = sample.At;
             _progressRunSince ??= sample.At;
             if (!_progressed)
@@ -574,6 +609,7 @@ public static class PlaybackHealthText
         SustainedPlaybackHealth.UserStopped => "Stopped",
         SustainedPlaybackHealth.SourceFailure => "The media could not be played",
         SustainedPlaybackHealth.RuntimeFailure => "The player failed",
+        SustainedPlaybackHealth.RecoveryStopped => "Stopped for automatic recovery",
         _ => "Unknown",
     };
 }

@@ -47,7 +47,11 @@ public sealed class PlaybackHealthMonitor
     public bool StopRequested { get; private set; }
     public event Action<PlaybackHealthTransition>? Transitioned;
 
+    public bool RecoveryStop { get; private set; }
     public void MarkStopRequested() => StopRequested = true;
+    /// <summary>Record that DemiMedia is stopping this player to recover, before the
+    /// stop is attempted, so the exit it causes can never be read as a user stop.</summary>
+    public void MarkRecoveryStop() => RecoveryStop = true;
 
     public PlaybackHealthSnapshot Snapshot() { lock (_gate) return _classifier.Snapshot(); }
 
@@ -56,7 +60,7 @@ public sealed class PlaybackHealthMonitor
         PlaybackHealthTransition? transition;
         lock (_gate)
             transition = _classifier.Finish(new PlaybackEnd { AttemptId = AttemptId, At = at,
-                ProcessStarted = processStarted, ExitCode = exitCode, StopRequested = StopRequested,
+                ProcessStarted = processStarted, ExitCode = exitCode, StopRequested = StopRequested, RecoveryStop = RecoveryStop,
                 EndFileReason = _endFileReason });
         if (transition is not null) Transitioned?.Invoke(transition);
     }
@@ -84,6 +88,9 @@ public sealed class PlaybackHealthMonitor
     private async Task<(PlaybackHealthSample Sample, MpvIpc? Ipc)> ReadAsync(MpvIpc? ipc, Stopwatch clock, CancellationToken token)
     {
         var values = new Dictionary<string, JsonElement>(Properties.Length);
+        // An unanswered poll has been unanswered since it was sent, not since its
+        // timeout expired; stamping it at the send keeps freeze timing honest.
+        TimeSpan sent = clock.Elapsed;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(_policy.SampleInterval * 3);
         try
@@ -102,7 +109,7 @@ public sealed class PlaybackHealthMonitor
             // No answer inside the budget. The connection is discarded, never
             // reused mid-reply, and this poll is recorded as unanswered.
             if (ipc is not null) await ipc.DisposeAsync();
-            return (new PlaybackHealthSample { AttemptId = AttemptId, At = clock.Elapsed, Responsive = false }, null);
+            return (new PlaybackHealthSample { AttemptId = AttemptId, At = sent, Responsive = false }, null);
         }
         return (Normalize(AttemptId, clock.Elapsed, values), ipc);
     }

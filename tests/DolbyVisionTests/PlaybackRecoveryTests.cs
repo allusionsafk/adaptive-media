@@ -34,44 +34,109 @@ internal static class PlaybackRecoveryTests
             return 0;
         }
         string mode = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "behavior.txt"));
-        File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "launches.txt"), mode + "\n");
+        string? startArgument = args.FirstOrDefault(x => x.StartsWith("--start="))?[8..];
+        File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "launches.txt"), mode + (startArgument is null ? "" : "|start=" + startArgument) + "\n");
         if (mode == "fail") return 1;
         if (mode == "media") return 2;
         if (mode == "clean") return 0;
         string pipeName = args.Single(x => x.StartsWith("--input-ipc-server="))[19..];
         if (pipeName.StartsWith(@"\\.\pipe\")) pipeName = pipeName[9..];
         string? log = args.FirstOrDefault(x => x.StartsWith("--log-file="))?[11..];
+        // Sustained-health modes compose like "full" at startup, then misbehave.
+        bool composes = mode is "full" or "partial" or "reject-stop" or "freeze" or "stall" or "crash-late" or "freeze-crash";
         if (log is not null && mode != "silent")
-            File.WriteAllText(log, "Initialized libplacebo test (API v371)\n" + (mode == "full" || mode == "partial" || mode == "reject-stop" ?
+            File.WriteAllText(log, "Initialized libplacebo test (API v371)\n" + (composes ?
                 "Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track)\n[vd] Opening decoder hevc\n[vd] Opening decoder hevc\n[vd] Selected decoder: hevc\n[vf] [el_pair]\nsh_dovi_compose_nlq\n[vd] Using hardware decoding (d3d11va).\n" : ""));
-        await using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        await pipe.WaitForConnectionAsync(timeout.Token);
-        using var reader = new StreamReader(pipe, leaveOpen: true);
-        await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
-        while (await reader.ReadLineAsync(timeout.Token) is { } line)
-        {
-            using var message = JsonDocument.Parse(line);
-            var command = message.RootElement.GetProperty("command");
-            string name = command[0].GetString()!;
-            string? prop = command.GetArrayLength() > 1 ? command[1].GetString() : null;
-            object? data = prop switch
+
+        // Playback position for the sustained-health modes: ten media seconds per
+        // real second from --start, so a short test covers a meaningful span.
+        // late-compose: the renderer reports first and the composed frames follow,
+        // as when a real launch starts mid-file.
+        if (mode == "late-compose" && log is not null)
+            _ = Task.Run(async () =>
             {
-                "mpv-version" => version,
-                "video-codec" when mode != "partial" && mode != "silent" && mode != "reject-stop" => "hevc",
-                "video-out-params" when mode != "partial" && mode != "silent" && mode != "reject-stop" => new { w = 3840, h = 2160 },
-                "hwdec-current" when mode == "full" || mode == "partial" || mode == "reject-stop" => "d3d11va",
-                "gpu-api" => "d3d11",
-                "gpu-context" => "d3d11",
-                _ => null
-            };
-            await writer.WriteLineAsync(JsonSerializer.Serialize(new { request_id = message.RootElement.GetProperty("request_id").GetInt32(), error = name == "quit" && mode == "reject-stop" ? "command failed" : data is null && name == "get_property" ? "property unavailable" : "success", data }));
-            if (name == "quit") return mode == "reject-stop" ? 1 : 0;
-            // The monitor has consumed a complete poll and, for partial, its log.
-            if (name == "set_property" && prop == "msg-level" && mode == "partial") return 1;
+                await Task.Delay(1500);
+                File.AppendAllText(log, "Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track)\n[vd] Opening decoder hevc\n[vd] Opening decoder hevc\n[vd] Selected decoder: hevc\n[vf] [el_pair]\nsh_dovi_compose_nlq\n[vd] Using hardware decoding (d3d11va).\n");
+            });
+        bool progresses = mode is "play" or "late-compose" or "pause" or "freeze" or "stall" or "crash-late" or "freeze-crash";
+        double from = double.TryParse(startArgument, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
+        var gate = new object();
+        Stopwatch? playing = null;
+        double Elapsed() { lock (gate) return playing?.Elapsed.TotalSeconds ?? 0; }
+        double Position() => from + 10 * (mode switch { "stall" or "pause" => Math.Min(Elapsed(), 0.6), _ => Elapsed() });
+        bool Frozen() => mode is "freeze" or "freeze-crash" && Elapsed() > 1.0;
+
+        var exit = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        async Task Serve(NamedPipeServerStream pipe)
+        {
+            try
+            {
+                using var reader = new StreamReader(pipe, leaveOpen: true);
+                await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
+                while (await reader.ReadLineAsync(lifetime.Token) is { } line)
+                {
+                    lock (gate) playing ??= Stopwatch.StartNew();
+                    // A frozen player reads nothing more and answers nothing.
+                    if (Frozen()) await Task.Delay(Timeout.Infinite, lifetime.Token);
+                    using var message = JsonDocument.Parse(line);
+                    var command = message.RootElement.GetProperty("command");
+                    string name = command[0].GetString()!;
+                    string? prop = command.GetArrayLength() > 1 ? command[1].GetString() : null;
+                    object? data = prop switch
+                    {
+                        "mpv-version" => version,
+                        "video-codec" when mode != "partial" && mode != "silent" && mode != "reject-stop" => "hevc",
+                        "video-out-params" when mode != "partial" && mode != "silent" && mode != "reject-stop" => new { w = 3840, h = 2160 },
+                        "hwdec-current" when composes || mode == "late-compose" => "d3d11va",
+                        "gpu-api" => "d3d11",
+                        "gpu-context" => "d3d11",
+                        "time-pos" when progresses => Position(),
+                        "duration" when progresses => 600.0,
+                        "pause" when progresses => mode == "pause" && Elapsed() > 0.6,
+                        "paused-for-cache" or "seeking" or "eof-reached" when progresses => false,
+                        _ => null
+                    };
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(new { request_id = message.RootElement.GetProperty("request_id").GetInt32(), error = name == "quit" && mode == "reject-stop" ? "command failed" : data is null && name == "get_property" ? "property unavailable" : "success", data }));
+                    if (name == "quit") { exit.TrySetResult(mode == "reject-stop" ? 1 : 0); return; }
+                    // The monitor has consumed a complete poll and, for partial, its log.
+                    if (name == "set_property" && prop == "msg-level" && mode == "partial") { exit.TrySetResult(1); return; }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException) { }
+            finally { await pipe.DisposeAsync(); }
         }
-        return 0;
+        // Like mpv, every client gets its own pipe instance, so the startup monitor,
+        // the health sampler and a recovery stop can all connect.
+        _ = Task.Run(async () =>
+        {
+            while (!exit.Task.IsCompleted)
+            {
+                var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                try { await pipe.WaitForConnectionAsync(lifetime.Token); }
+                catch (OperationCanceledException) { await pipe.DisposeAsync(); return; }
+                _ = Serve(pipe);
+            }
+        });
+        if (mode is "crash-late" or "freeze-crash")
+            _ = Task.Run(async () =>
+            {
+                while (Elapsed() < (mode == "crash-late" ? 1.2 : 1.6)) await Task.Delay(20);
+                Environment.Exit(unchecked((int)0xC0000005));
+            });
+        return await exit.Task.WaitAsync(TimeSpan.FromSeconds(30));
     }
+
+    /// <summary>The product policy with time compressed so a sustained failure is
+    /// reached in about a second. Every rule is the same; only durations shrink.</summary>
+    private static readonly PlaybackHealthPolicy FastHealth = new()
+    {
+        SampleInterval = TimeSpan.FromMilliseconds(100), WindowLength = TimeSpan.FromMilliseconds(500),
+        StallAfter = TimeSpan.FromMilliseconds(600), StartupStallAfter = TimeSpan.FromSeconds(3),
+        FrozenAfter = TimeSpan.FromMilliseconds(600), ProgressToClearStall = TimeSpan.FromMilliseconds(300),
+        ResumeRewindSeconds = 0.25, RecoveryStopGrace = TimeSpan.FromMilliseconds(500),
+    };
 
     public static async Task RunAsync(Action<bool, string> check, string? only = null)
     {
@@ -110,7 +175,7 @@ internal static class PlaybackRecoveryTests
             File.WriteAllText(Path.Combine(stableDir, "version.txt"), "stable-protocol-peer");
             string stableExe = Path.Combine(stableDir, "DolbyVisionTests.exe");
             string media = Path.Combine(root, "source.mkv"); File.WriteAllText(media, "protocol fixture only");
-            var service = new PlaybackService { NativeDolbyVision = new NativeDvLane(store, a) };
+            var service = new PlaybackService { NativeDolbyVision = new NativeDvLane(store, a), HealthPolicy = FastHealth };
             var plan = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
                 new SystemSummary { MpvPath = stableExe }, new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = false, AutoHdrSwitch = false }, new(1280, 720));
             check(plan.Executable == Path.Combine(storeRoot, a.VersionId, "DolbyVisionTests.exe"), "RECOVERY: production PrepareAsync selected current generation");
@@ -196,6 +261,138 @@ internal static class PlaybackRecoveryTests
                     if (outcome == "media") check(service.LastPlaybackHealth?.State == SustainedPlaybackHealth.SourceFailure &&
                         service.LastNativeHealth?.Health == NativeDvHealth.SourceNotPlayable, "SUSTAINED HEALTH: a media refusal is SourceFailure alongside the unchanged native verdict");
                 }
+            }
+            if (only is null or "sustained")
+            {
+                string Launches(NativeDvRuntimeDescriptor d) => Path.Combine(storeRoot, d.VersionId, "launches.txt");
+                int Count(string path) => File.Exists(path) ? File.ReadAllLines(path).Length : 0;
+                string Last(string path) => File.ReadAllLines(path)[^1];
+                double StartOf(PlaybackPlan p) => double.Parse(p.Arguments.Single(x => x.StartsWith("--start="))[8..], System.Globalization.CultureInfo.InvariantCulture);
+                string stableLaunches = Path.Combine(stableDir, "launches.txt");
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "play");
+                void Reset() { service.NativeHealth.Clear(a.VersionId); service.NativeHealth.Clear(b.VersionId); }
+
+                // 1, 16-18, 21: current freezes after composing FEL -> previous, once, resumed.
+                foreach (var (failure, trigger) in new[] { ("freeze", SustainedPlaybackHealth.Frozen), ("stall", SustainedPlaybackHealth.Stalled),
+                    ("crash-late", SustainedPlaybackHealth.RuntimeFailure) })
+                {
+                    Reset(); Mode(a, failure); Mode(b, "play");
+                    int aBefore = Count(Launches(a)), bBefore = Count(Launches(b)), stableBefore = Count(stableLaunches);
+                    await service.LaunchAsync(plan, 3);
+                    var report = service.LastReport!;
+                    string tag = "SUSTAINED RECOVERY (" + failure + "): ";
+                    check(report.Attempts.Count == 2 && Count(Launches(a)) == aBefore + 1 && Count(Launches(b)) == bBefore + 1 &&
+                          Count(stableLaunches) == stableBefore, tag + "exactly one replacement, on the previous runtime");
+                    check(report.Recovery.Count == 1 && service.LastRecovery?.Trigger == trigger.ToString() &&
+                          service.LastRecovery.Step == nameof(PlaybackRecoveryStep.RetryOnPreviousNative), tag + "one recovery with the right trigger");
+                    var failed = report.PlaybackHealth[0];
+                    check(failed.State == (failure == "crash-late" ? nameof(SustainedPlaybackHealth.RuntimeFailure) : nameof(SustainedPlaybackHealth.RecoveryStopped)) &&
+                          failed.State != nameof(SustainedPlaybackHealth.UserStopped), tag + "the failed attempt is not reported as a user stop");
+                    double resume = StartOf(report.Attempts[1]);
+                    check(failed.ResumePosition is double confirmed && Math.Abs(resume - confirmed) < 0.001 && resume > 1 &&
+                          Last(Launches(b)).EndsWith("|start=" + PlaybackRecoveryText.StartArgument(resume)[8..]),
+                        tag + $"the replacement launched at the failed attempt's own confirmed position ({resume:0.00})");
+                    check(!report.Attempts[0].Arguments.Any(x => x.StartsWith("--start=")), tag + "the original plan was not mutated with a resume point");
+                    var replacement = report.PlaybackHealth[1];
+                    check(replacement.Attempt != failed.Attempt && replacement.PlaybackProgressed && replacement.StallEpisodes == 0 &&
+                          replacement.FreezeEpisodes == 0 && replacement.State == nameof(SustainedPlaybackHealth.UserStopped),
+                        tag + "the replacement established its own fresh health");
+                    check(service.LastNativeObservation?.Delivered != NativeDvDelivered.FullEnhancementLayer &&
+                          service.LastNativeObservation?.HardwareDecoderInUse != "d3d11va" &&
+                          report.FallbackHistory.Where(x => x.Contains("composition active")).All(x => x.StartsWith("Earlier native attempt")),
+                        tag + "the replacement inherits no FEL or hwdec evidence; rollback success is not composition success");
+                    check(service.LastNativePlaybackStatus == NativeDvPlaybackStatus.RolledBackToPreviousRuntime &&
+                          service.NativeHealth.FaultCount(a.VersionId) == 0, tag + "rolled back without poisoning the generation for the session");
+                    check(report.FallbackHistory.Any(x => x.StartsWith(PlaybackHealthText.Describe(trigger) + "\nRecovery: Previous verified runtime · resumed at ")),
+                        tag + "calm recovery line");
+                }
+
+                // The replacement resumes mid-file, so its composed frames arrive after
+                // its renderer reports: its own later evidence must still be read.
+                Reset(); Mode(a, "freeze"); Mode(b, "late-compose");
+                {
+                    await service.LaunchAsync(plan, 4);
+                    var report = service.LastReport!;
+                    check(report.Attempts.Count == 2 && service.LastNativeObservation?.Delivered == NativeDvDelivered.FullEnhancementLayer &&
+                          !report.FallbackHistory.Any(x => x.StartsWith("Base layer only")),
+                        "SUSTAINED RECOVERY: a resumed replacement's late composition is established from its own log, not under-reported");
+                }
+
+                // 9, 11, 12: current and previous both freeze -> stable, never back to current.
+                Reset(); Mode(a, "freeze"); Mode(b, "freeze");
+                {
+                    int aBefore = Count(Launches(a)), bBefore = Count(Launches(b)), stableBefore = Count(stableLaunches);
+                    await service.LaunchAsync(plan, 3);
+                    var report = service.LastReport!;
+                    check(report.Attempts.Count == 3 && Count(Launches(a)) == aBefore + 1 && Count(Launches(b)) == bBefore + 1 &&
+                          Count(stableLaunches) == stableBefore + 1 && report.Attempts[2].Executable == stableExe,
+                        "SUSTAINED RECOVERY: current then previous freeze -> stable; two native attempts, no bounce");
+                    check(report.Recovery.Select(x => x.Step).SequenceEqual([nameof(PlaybackRecoveryStep.RetryOnPreviousNative), nameof(PlaybackRecoveryStep.UseStablePlayback)]),
+                        "SUSTAINED RECOVERY: one recovery per failed attempt, each a different step");
+                    check(StartOf(report.Attempts[2]) > StartOf(report.Attempts[1]) && Last(stableLaunches).Contains("|start="),
+                        "SUSTAINED RECOVERY: stable resumes from the previous runtime's own later position");
+                    check(service.LastPlaybackHealth?.State == SustainedPlaybackHealth.UserStopped && service.LastNativeObservation is null,
+                        "SUSTAINED RECOVERY: stable result carries its own health and no native evidence");
+                }
+
+                // 8: the startup rollback was already spent -> a later freeze goes straight to stable.
+                Reset(); Mode(a, "fail"); Mode(b, "freeze");
+                {
+                    int bBefore = Count(Launches(b)), stableBefore = Count(stableLaunches);
+                    await service.LaunchAsync(plan, 3);
+                    var report = service.LastReport!;
+                    check(report.Attempts.Count == 3 && Count(Launches(b)) == bBefore + 1 && Count(stableLaunches) == stableBefore + 1 &&
+                          report.Recovery.Count == 1 && report.Recovery[0].Step == nameof(PlaybackRecoveryStep.UseStablePlayback),
+                        "SUSTAINED RECOVERY: startup rollback + later freeze shares one budget -> stable");
+                    check(service.LastNativePlaybackStatus == NativeDvPlaybackStatus.PreviousRuntimeAlsoFailed,
+                        "SUSTAINED RECOVERY: the status says both native runtimes failed");
+                }
+
+                // 10: previous exists but no longer validates -> stable directly.
+                Reset(); Mode(a, "freeze"); Mode(b, "play");
+                {
+                    int bBefore = Count(Launches(b)), stableBefore = Count(stableLaunches);
+                    using (var unreadable = new FileStream(Path.Combine(storeRoot, b.VersionId, b.LauncherRelativePath), FileMode.Open, FileAccess.Read, FileShare.None))
+                        await service.LaunchAsync(plan, 3);
+                    var report = service.LastReport!;
+                    check(report.Attempts.Count == 2 && Count(Launches(b)) == bBefore && Count(stableLaunches) == stableBefore + 1 &&
+                          report.Recovery.Single().Step == nameof(PlaybackRecoveryStep.UseStablePlayback),
+                        "SUSTAINED RECOVERY: an unverifiable previous runtime is never launched; stable instead");
+                }
+
+                // 13: a freeze and a crash racing each other still recover once.
+                Reset(); Mode(a, "freeze-crash"); Mode(b, "play");
+                {
+                    await service.LaunchAsync(plan, 3);
+                    check(service.LastReport!.Attempts.Count == 2 && service.LastReport.Recovery.Count == 1,
+                        "SUSTAINED RECOVERY: racing freeze and crash produce exactly one recovery");
+                }
+
+                // E: user pause and user stop never recover.
+                foreach (string calm in new[] { "pause", "play" })
+                {
+                    Reset(); Mode(a, calm);
+                    int aBefore = Count(Launches(a));
+                    await service.LaunchAsync(plan, 3);
+                    check(service.LastReport!.Attempts.Count == 1 && service.LastReport.Recovery.Count == 0 && Count(Launches(a)) == aBefore + 1 &&
+                          service.LastPlaybackHealth?.State == SustainedPlaybackHealth.UserStopped && service.LastPlaybackHealth.StallEpisodes == 0,
+                        "SUSTAINED RECOVERY: " + calm + " then stop never triggers recovery");
+                }
+
+                // 23: stable playback that fails hard is reported, not relaunched.
+                var stablePlan = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
+                    new SystemSummary { MpvPath = stableExe }, new AppSettings { NativeDolbyVisionLane = false, AutoHdrSwitch = false }, new(1280, 720));
+                foreach (var (failure, trigger) in new[] { ("crash-late", SustainedPlaybackHealth.RuntimeFailure), ("stall", SustainedPlaybackHealth.Stalled) })
+                {
+                    File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), failure);
+                    int before = Count(stableLaunches);
+                    await service.LaunchAsync(stablePlan, 3);
+                    check(Count(stableLaunches) == before + 1 && service.LastReport!.Attempts.Count == 1 &&
+                          service.LastRecovery?.Step == nameof(PlaybackRecoveryStep.NoRecoveryAvailable) && service.LastRecovery.Trigger == trigger.ToString(),
+                        "SUSTAINED RECOVERY: stable " + failure + " is reported and not relaunched");
+                }
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "base");
+                Mode(a, "full"); Mode(b, "base"); Reset();
             }
             if (only is null or "unprotected")
             {

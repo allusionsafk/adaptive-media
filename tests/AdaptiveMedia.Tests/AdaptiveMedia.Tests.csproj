@@ -6,5 +6,6 @@
     <Compile Include="../../src/AdaptiveMedia.App/MpvIpc.cs" Link="MpvIpc.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" Link="Models.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealth.cs" Link="PlaybackHealth.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackRecovery.cs" Link="PlaybackRecovery.cs" />
   </ItemGroup>
 </Project>

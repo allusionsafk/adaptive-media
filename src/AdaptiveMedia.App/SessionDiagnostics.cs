@@ -18,6 +18,8 @@ public sealed class SessionDiagnostics
     public List<string> FallbackHistory { get; set; } = [];
     /// <summary>Final sustained playback health of each attempt, in order.</summary>
     public List<PlaybackHealthReport> PlaybackHealth { get; } = [];
+    /// <summary>Automatic recovery decisions made during this playback, in order.</summary>
+    public List<PlaybackRecoveryRecord> Recovery { get; } = [];
     public int? ExitCode { get; set; }
     public string? Error { get; set; }
     public string Summary { get; set; } = "No session recorded.";
@@ -46,7 +48,7 @@ public static class DiagnosticsStore
                 x.StartsWith("--ytdl-format=") ? "--ytdl-format=[selected]" : x) } : null;
         string text = Redact(JsonSerializer.Serialize(new { report.Version, report.Windows, report.Started, report.Source,
             report.Hardware, Plan = ShareablePlan(report.Plan), Attempts = report.Attempts.Select(ShareablePlan), report.MpvVersion, report.RtxDriverActiveVerified, report.Observed,
-            report.FallbackHistory, report.PlaybackHealth, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
+            report.FallbackHistory, report.PlaybackHealth, report.Recovery, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
         string path = Path.Combine(DirectoryPath, "latest.json");
         File.WriteAllText(path + ".tmp", text); File.Move(path + ".tmp", path, true);
         File.WriteAllText(Path.Combine(DirectoryPath, "latest.txt"), Redact(report.Summary + "\n" + string.Join("\n", report.FallbackHistory)));
@@ -75,11 +77,11 @@ public static class DiagnosticsStore
 public sealed record PlaybackHealthReport(long Attempt, string Runtime, string State, string WorstCondition,
     string Explanation, bool PlaybackProgressed, int PressureEpisodes, int DegradationEpisodes, int StallEpisodes,
     int FreezeEpisodes, long OutputDrops, long DecoderDrops, long TimingEvents, int WindowsEvaluated,
-    int SamplesAccepted, int SamplesRejected, int Discontinuities, IReadOnlyList<string> Transitions)
+    int SamplesAccepted, int SamplesRejected, int Discontinuities, double? ResumePosition, IReadOnlyList<string> Transitions)
 {
     public static PlaybackHealthReport From(PlaybackHealthSnapshot s, string runtime) => new(s.AttemptId, runtime,
         s.State.ToString(), s.WorstCondition.ToString(), s.Explanation, s.PlaybackProgressed, s.PressureEpisodes,
         s.DegradationEpisodes, s.StallEpisodes, s.FreezeEpisodes, s.OutputDrops, s.DecoderDrops, s.TimingEvents,
-        s.WindowsEvaluated, s.SamplesAccepted, s.SamplesRejected, s.Discontinuities,
+        s.WindowsEvaluated, s.SamplesAccepted, s.SamplesRejected, s.Discontinuities, s.ResumePosition,
         s.Transitions.Select(t => $"{t.At.TotalSeconds:0.0}s {t.From} -> {t.To}: {t.Reason}").ToArray());
 }
