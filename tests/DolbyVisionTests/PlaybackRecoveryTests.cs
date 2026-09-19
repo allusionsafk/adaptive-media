@@ -150,7 +150,7 @@ internal static class PlaybackRecoveryTests
             if (only == "pins") return;
             string storeRoot = Path.Combine(root, "runtimes", "native-dv");
             var store = new NativeDvRuntimeStore(storeRoot);
-            NativeDvRuntimeDescriptor Install(char id, string mode)
+            NativeDvRuntimeDescriptor Install(char id, string mode, bool unlaunchable = false)
             {
                 string generation = new(id, 64);
                 string folder = Path.Combine(storeRoot, generation);
@@ -158,6 +158,8 @@ internal static class PlaybackRecoveryTests
                 File.WriteAllText(Path.Combine(folder, "behavior.txt"), mode);
                 if (only is null or "probe") File.WriteAllText(Path.Combine(folder, "require-probe-pin"), "");
                 string exe = Path.Combine(folder, "DolbyVisionTests.exe");
+                // Hash-verified, but not a program Windows can start.
+                if (unlaunchable) File.WriteAllText(exe, "verified bytes that are not an executable");
                 string version = id == 'a' ? "0.41.0-1044-g14f2d48cb" : "0.41.0-1042-g7e4cb538a";
                 File.WriteAllText(Path.Combine(folder, "version.txt"), version);
                 var descriptor = new NativeDvRuntimeDescriptor(generation, version,
@@ -303,8 +305,20 @@ internal static class PlaybackRecoveryTests
                         tag + "the replacement inherits no FEL or hwdec evidence; rollback success is not composition success");
                     check(service.LastNativePlaybackStatus == NativeDvPlaybackStatus.RolledBackToPreviousRuntime &&
                           service.NativeHealth.FaultCount(a.VersionId) == 0, tag + "rolled back without poisoning the generation for the session");
-                    check(report.FallbackHistory.Any(x => x.StartsWith(PlaybackHealthText.Describe(trigger) + "\nRecovery: Previous verified runtime · resumed at ")),
+                    check(report.FallbackHistory.Any(x => x.StartsWith(PlaybackHealthText.Describe(trigger) + "\nRecovery: Previous verified native runtime · resumed near ")),
                         tag + "calm recovery line");
+                    // Truth surface: what launched, this attempt's own evidence, history for the rest.
+                    var truth = service.CurrentTruth()!;
+                    check(truth.Recovery.Lines.Single().Contains("→ Previous verified native runtime · resumed near ") &&
+                          service.LastRecovery!.LaunchedKind == PlaybackAttemptKind.NativePrevious && service.LastRecovery.LaunchedAttempt == replacement.Attempt,
+                        tag + "TRUTH: recovery names the previous runtime that actually launched");
+                    check(!truth.Observed.Lines.Any(x => x.Contains("FEL")) && truth.History.Single().Lines[0] == "Full FEL observed",
+                        tag + "TRUTH: the failed attempt's FEL is history only; the replacement's Observed is its own");
+                    check(truth.Health.Lines[0] == "Stopped by user" && truth.Planned.Lines.Any(x => x.Contains("(previous)")) &&
+                          truth.Planned.Lines.Any(x => x.StartsWith("Start near 00:00:")), tag + "TRUTH: current attempt planned/health are the replacement's");
+                    check(!report.FallbackHistory.Any(x => x.StartsWith("Live diagnostics unavailable")) &&
+                          report.FallbackHistory.Count(x => x.StartsWith("Detailed live diagnostics stopped")) <= 1 && report.TruthChain is not null,
+                        tag + "TRUTH: no duplicated diagnostics line; the truth chain is saved with the report");
                 }
 
                 // The replacement resumes mid-file, so its composed frames arrive after
@@ -316,6 +330,41 @@ internal static class PlaybackRecoveryTests
                     check(report.Attempts.Count == 2 && service.LastNativeObservation?.Delivered == NativeDvDelivered.FullEnhancementLayer &&
                           !report.FallbackHistory.Any(x => x.StartsWith("Base layer only")),
                         "SUSTAINED RECOVERY: a resumed replacement's late composition is established from its own log, not under-reported");
+                }
+
+                // The retained runtime validates (identity, hashes, adapter) and is
+                // selected, but its launcher cannot be started: stable is what actually
+                // launches, and every surface must say stable, never previous.
+                {
+                    var d = Install('d', "play", unlaunchable: true);
+                    string state = Path.Combine(storeRoot, NativeDvRuntimeLifecycle.StateFileName);
+                    string original = File.ReadAllText(state);
+                    File.WriteAllText(state, JsonSerializer.Serialize(new NativeDvLifecycleRecord(a.VersionId, d.VersionId, null)));
+                    try
+                    {
+                        Reset(); Mode(a, "freeze");
+                        check(new NativeDvRuntimeLifecycle(store).ResolveFallback(a.VersionId).IsUsable,
+                            "TRUTH: setup - the retained unlaunchable runtime validates as a fallback");
+                        int dBefore = Count(Launches(d)), stableBefore = Count(stableLaunches);
+                        await service.LaunchAsync(plan, 3);
+                        var report = service.LastReport!;
+                        var truth = service.CurrentTruth()!;
+                        check(Count(Launches(d)) == dBefore && Count(stableLaunches) == stableBefore + 1 && report.Attempts.Count == 3 &&
+                              report.Attempts[2].Executable == stableExe, "TRUTH: the selected previous runtime never launched; stable did");
+                        check(service.LastRecovery is { LaunchedKind: PlaybackAttemptKind.Stable, Step: nameof(PlaybackRecoveryStep.UseStablePlayback) } r && r.Target.Contains(d.VersionId),
+                            "TRUTH: the record keeps what was selected (previous) but reports what launched (stable)");
+                        check(report.PlaybackHealth.Count == 3 && report.PlaybackHealth[1].Runtime.Contains(d.VersionId) &&
+                              report.PlaybackHealth[1].State == nameof(SustainedPlaybackHealth.RuntimeFailure) && truth.History.Count == 2 &&
+                              truth.History[1].Lines.Contains("Composition not observed"),
+                            "TRUTH: the previous runtime's failed start is history, with nothing observed");
+                        check(truth.Recovery.Lines.Single().Contains("→ Stable playback · resumed near ") && !truth.Recovery.Lines.Single().Contains("Previous") &&
+                              truth.Why.Lines.Any(x => x.StartsWith("Stable playback selected after")),
+                            "TRUTH: Recovery and Why say stable playback, not the previous runtime");
+                        check(!report.FallbackHistory.Any(x => x.Contains("Recovery: Previous")) && (report.TruthChain ?? "").Contains("→ Stable playback"),
+                            "TRUTH: no status line or saved report claims the previous runtime");
+                        check(!truth.Observed.Lines.Any(x => x.Contains("FEL") || x.Contains("Composition")), "TRUTH: stable Observed carries no native evidence");
+                    }
+                    finally { File.WriteAllText(state, original); }
                 }
 
                 // 9, 11, 12: current and previous both freeze -> stable, never back to current.

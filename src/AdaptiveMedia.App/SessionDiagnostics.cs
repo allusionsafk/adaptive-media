@@ -20,6 +20,8 @@ public sealed class SessionDiagnostics
     public List<PlaybackHealthReport> PlaybackHealth { get; } = [];
     /// <summary>Automatic recovery decisions made during this playback, in order.</summary>
     public List<PlaybackRecoveryRecord> Recovery { get; } = [];
+    /// <summary>The user-facing truth chain at the end of playback.</summary>
+    public string? TruthChain { get; set; }
     public int? ExitCode { get; set; }
     public string? Error { get; set; }
     public string Summary { get; set; } = "No session recorded.";
@@ -48,7 +50,7 @@ public static class DiagnosticsStore
                 x.StartsWith("--ytdl-format=") ? "--ytdl-format=[selected]" : x) } : null;
         string text = Redact(JsonSerializer.Serialize(new { report.Version, report.Windows, report.Started, report.Source,
             report.Hardware, Plan = ShareablePlan(report.Plan), Attempts = report.Attempts.Select(ShareablePlan), report.MpvVersion, report.RtxDriverActiveVerified, report.Observed,
-            report.FallbackHistory, report.PlaybackHealth, report.Recovery, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
+            report.FallbackHistory, report.PlaybackHealth, report.Recovery, report.TruthChain, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
         string path = Path.Combine(DirectoryPath, "latest.json");
         File.WriteAllText(path + ".tmp", text); File.Move(path + ".tmp", path, true);
         File.WriteAllText(Path.Combine(DirectoryPath, "latest.txt"), Redact(report.Summary + "\n" + string.Join("\n", report.FallbackHistory)));

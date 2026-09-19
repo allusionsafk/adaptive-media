@@ -126,9 +126,9 @@ internal static class PlaybackRecoveryTests
         Check(PlaybackRecoveryText.StartArgument(2537.25) == "--start=2537.25", "resume uses mpv --start in invariant culture");
         Check(PlaybackRecoveryText.Position(2537) == "00:42:17", "product time format");
         Check(PlaybackRecoveryText.Describe(new(PlaybackRecoveryStep.UseStablePlayback, SustainedPlaybackHealth.Stalled, ""), 2537)
-            == "Playback health: Playback stopped making progress\nRecovery: Stable playback · resumed at 00:42:17", "calm two-line recovery text");
+            == "Playback health: Playback stopped making progress\nRecovery: Stable playback · resumed near 00:42:17", "calm two-line recovery text");
         Check(PlaybackRecoveryText.Describe(new(PlaybackRecoveryStep.RetryOnPreviousNative, SustainedPlaybackHealth.Frozen, ""), null)
-            .Contains("no confirmed position"), "no resume point is reported truthfully");
+            .Contains("restarted from beginning"), "no resume point is reported truthfully");
 
         // Pause/buffer/seek never reach a trigger state, even for a long time.
         {

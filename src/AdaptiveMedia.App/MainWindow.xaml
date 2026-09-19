@@ -129,6 +129,8 @@
                         <TextBlock x:Name="SettingsWarningText" TextWrapping="Wrap" Visibility="Collapsed" Margin="0,0,0,14" Foreground="#984B00" AutomationProperties.LiveSetting="Polite"/>
                         <TextBlock Text="Playback activity" FontWeight="SemiBold"/>
                         <TextBlock x:Name="RuntimeText" Text="Playback has not started. Driver activity is checked during playback where observable." TextWrapping="Wrap" Margin="0,6,0,16" AutomationProperties.LiveSetting="Polite"/>
+                        <Expander x:Name="TruthExpander" Header="Playback details" Visibility="Collapsed" Margin="0,0,0,12" Expanded="TruthExpander_Expanded">
+                        <TextBlock x:Name="TruthText" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" AutomationProperties.Name="Requested, planned, observed, health and recovery for this playback"/></Expander>
                         <Expander Header="System details">
                         <TextBlock x:Name="SystemText" Text="Detecting hardware and display state…" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0"/></Expander>
                     </StackPanel>

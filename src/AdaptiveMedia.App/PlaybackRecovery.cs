@@ -136,8 +136,14 @@ public sealed class PlaybackRecoveryGate
 }
 
 /// <summary>What recovery did for one failed attempt, for the report.</summary>
+/// <remarks><see cref="Target"/> and <see cref="ResumeAt"/> are what was selected.
+/// The Launched members are bound only when a replacement player really starts,
+/// from that attempt's own plan, and are the only ones the product reports as
+/// the recovery that happened.</remarks>
 public sealed record PlaybackRecoveryRecord(long FailedAttempt, string FailedRuntime, string Trigger, string Step,
-    double? ResumeAt, string Target, string Explanation);
+    double? ResumeAt, string Target, string Explanation, PlaybackAttemptKind FailedKind = PlaybackAttemptKind.Stable,
+    long? LaunchedAttempt = null, PlaybackAttemptKind? LaunchedKind = null, string? LaunchedRuntime = null,
+    double? LaunchedResumeAt = null);
 
 public static class PlaybackRecoveryText
 {
@@ -151,12 +157,12 @@ public static class PlaybackRecoveryText
     public static string Describe(PlaybackRecoveryDecision decision, double? resumeAt)
     {
         string health = PlaybackHealthText.Describe(decision.Trigger);
-        string where = resumeAt is double r ? " · resumed at " + Position(r) : " · restarted from the beginning (no confirmed position)";
+        string where = resumeAt is double r ? " · resumed near " + Position(r) : " · restarted from beginning";
         return decision.Step switch
         {
-            PlaybackRecoveryStep.RetryOnPreviousNative => health + "\nRecovery: Previous verified runtime" + where,
+            PlaybackRecoveryStep.RetryOnPreviousNative => health + "\nRecovery: Previous verified native runtime" + where,
             PlaybackRecoveryStep.UseStablePlayback => health + "\nRecovery: Stable playback" + where,
-            PlaybackRecoveryStep.NoRecoveryAvailable => health + "\nRecovery: Not available for this player",
+            PlaybackRecoveryStep.NoRecoveryAvailable => health + "\nRecovery: Unavailable for this player",
             _ => health,
         };
     }
