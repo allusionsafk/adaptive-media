@@ -452,7 +452,23 @@ internal static class PlaybackRecoveryTests
             await first.StandardInput.WriteLineAsync("release"); await first.WaitForExitAsync();
             check(new NativeDvRuntimeLifecycle(store).CollectGarbage(null, new(null, null, null)) == 0 && File.ReadAllText(Path.Combine(generation, "runtime")) == "intact", "PINS: releasing first owner cannot expose second owner to partial GC");
             second.Kill(true); await second.WaitForExitAsync();
-            check(new NativeDvRuntimeLifecycle(store).CollectGarbage(null, new(null, null, null)) == 1, "PINS: GC resumes after the last owner releases");
+            // Windows can release a terminated owner's share lock a few milliseconds
+            // after the process is reported exited (measured: up to ~7 ms under
+            // contention). GC correctly skips a generation it cannot lease
+            // exclusively and collects it on a later pass, so what must hold is
+            // eventual collection, bounded, with the files intact until then.
+            int collected = 0;
+            var releaseDeadline = Stopwatch.StartNew();
+            while (collected == 0 && releaseDeadline.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                collected = new NativeDvRuntimeLifecycle(store).CollectGarbage(null, new(null, null, null));
+                if (collected == 0)
+                {
+                    check(File.ReadAllText(Path.Combine(generation, "runtime")) == "intact", "PINS: a skipped collection never leaves a partial deletion");
+                    await Task.Delay(25);
+                }
+            }
+            check(collected == 1 && !Directory.Exists(generation), "PINS: GC resumes after the last owner releases");
             check(store.PinGeneration(id) is null, "PINS: generation deleted between selection and launch cannot be pinned");
             Directory.CreateDirectory(generation);
             using (var deleting = store.TryAcquireGenerationDeletionLock(id))
