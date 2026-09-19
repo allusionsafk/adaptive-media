@@ -12,6 +12,9 @@ public sealed class MpvIpc : IAsyncDisposable
     {
         _pipe = new NamedPipeClientStream(".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous);
     }
+    /// <summary>Player events that arrive while a reply is awaited. Events are only
+    /// read in passing, so this sees some of them, never a guaranteed stream.</summary>
+    public Action<JsonElement>? EventReceived { get; set; }
     public async Task ConnectAsync(CancellationToken token)
     {
         await _pipe.ConnectAsync(token);
@@ -38,6 +41,7 @@ public sealed class MpvIpc : IAsyncDisposable
                 bool success = root.GetProperty("error").GetString() == "success";
                 return (success, success && root.TryGetProperty("data", out var data) ? data.Clone() : null);
             }
+            if (EventReceived is not null && root.TryGetProperty("event", out _)) EventReceived(root.Clone());
         }
         throw new EndOfStreamException("Player closed its diagnostics connection.");
     }

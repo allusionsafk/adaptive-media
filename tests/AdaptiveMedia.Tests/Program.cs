@@ -119,7 +119,8 @@ else if (args.Length > 0)
     Check(Plan(probe).RtxSrConstructed, "Real probe feeds canonical RTX plan");
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(probe));
 }
-Console.WriteLine($"PASS: {assertions} assertions");
+int healthAssertions = PlaybackHealthTests.Run(Check);
+Console.WriteLine($"PASS: {assertions} assertions ({healthAssertions} sustained playback health)");
 return 0;
 }
 catch (Exception ex)
