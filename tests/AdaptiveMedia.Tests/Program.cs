@@ -122,7 +122,8 @@ else if (args.Length > 0)
 int healthAssertions = PlaybackHealthTests.Run(Check);
 int recoveryAssertions = PlaybackRecoveryTests.Run(Check);
 int truthAssertions = PlaybackTruthTests.Run(Check);
-Console.WriteLine($"PASS: {assertions} assertions ({healthAssertions} sustained playback health, {recoveryAssertions} automatic recovery, {truthAssertions} playback truth)");
+int samplerAssertions = await PlaybackHealthMonitorTests.RunAsync(Check);
+Console.WriteLine($"PASS: {assertions} assertions ({healthAssertions} sustained playback health, {recoveryAssertions} automatic recovery, {truthAssertions} playback truth, {samplerAssertions} health sampler)");
 return 0;
 }
 catch (Exception ex)
