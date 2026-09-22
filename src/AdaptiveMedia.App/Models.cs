@@ -62,7 +62,8 @@ public sealed record PlaybackOptions(
     bool RtxHdr,
     string? YtdlFormat = null,
     bool AutoHdrSwitch = false,
-    string CleanupMode = "Legacy");
+    string CleanupMode = "Legacy",
+    EnhancementIntent? Intent = null);
 
 
 public sealed class PlaybackLaunchPlan

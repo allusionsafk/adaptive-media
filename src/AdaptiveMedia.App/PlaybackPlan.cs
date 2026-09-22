@@ -11,7 +11,8 @@ public sealed record MediaInfo(int Width = 0, int Height = 0, double Fps = 0,
     public bool IsKnownSdr => Transfer is "bt.1886" or "srgb" or "gamma1.8" or "gamma2.0" or "gamma2.2" or "gamma2.4" or "gamma2.6" or "gamma2.8" or "linear";
     public bool Known => Width > 0 && Height > 0;
 }
-public sealed record PlaybackTarget(int Width, int Height, int Screen = 0, bool Fullscreen = false, bool HdrEnabled = false);
+public sealed record PlaybackTarget(int Width, int Height, int Screen = 0, bool Fullscreen = false, bool HdrEnabled = false,
+    double? RefreshRateHz = null);
 public sealed record PlaybackCapabilities(bool Nvidia, bool Vpp, string? NvidiaAdapter = null, bool Rtx = false);
 public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Arguments, PlaybackOptions Requested,
     MediaInfo Source, PlaybackTarget Target, string Renderer, bool RtxSrConstructed, bool RtxHdrConstructed,
