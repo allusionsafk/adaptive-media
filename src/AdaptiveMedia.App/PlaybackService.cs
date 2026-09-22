@@ -64,6 +64,15 @@ public sealed class PlaybackService
     /// recent playback.</summary>
     public NativeDvPlaybackStatus LastNativePlaybackStatus { get; private set; }
 
+    /// <summary>Sustained health of the most recent player attempt: whether playback
+    /// that started is still healthy. Live while playing, final after it ends.
+    /// Separate from <see cref="LastNativeHealth"/>, which is a startup verdict
+    /// about one native runtime generation.</summary>
+    public PlaybackHealthSnapshot? LastPlaybackHealth => _health?.Snapshot() ?? _finalHealth;
+    private volatile PlaybackHealthMonitor? _health;
+    private PlaybackHealthSnapshot? _finalHealth;
+    private long _healthAttempts;
+
     public static string NativeConfigDirectory => Path.Combine(SettingsStore.DirectoryPath, "native-dv-config");
 
     /// <summary>Planning placeholder; each actual launch gets its own temporary log.</summary>
@@ -211,6 +220,7 @@ public sealed class PlaybackService
         LastNativeHealth = null;
         LastNativeFallback = null;
         LastNativePlaybackStatus = NativeDvPlaybackStatus.NotUsed;
+        _finalHealth = null;
         LastReport = new() { Plan = plan, Summary = plan.Summary, MpvVersion = prepared?.MpvVersion ?? "unknown", Hardware = prepared?.Hardware };
         using var hdrSession = HdrSession.Begin(plan, LastReport);
         DiagnosticsStore.Event("info", "playback-plan", plan.Renderer);
@@ -224,7 +234,7 @@ public sealed class PlaybackService
                 LastReport.ExitCode = native.ExitCode;
                 LastReport.Summary = (LastReport.Plan?.Summary ?? "Playback") + "\n" +
                     (native.ExitCode == 0 ? "Playback ended." : $"Playback failed ({native.ExitCode}).") +
-                    "\n" + string.Join("\n", LastReport.FallbackHistory);
+                    HealthSummaryLine() + "\n" + string.Join("\n", LastReport.FallbackHistory);
                 try { DiagnosticsStore.Save(LastReport); }
                 catch (IOException) { StatusChanged?.Invoke("Playback ended; diagnostics could not be saved."); }
                 return native.ExitCode;
@@ -250,7 +260,7 @@ public sealed class PlaybackService
         }
         LastReport.ExitCode = code;
         LastReport.Summary = (LastReport.Plan?.Summary ?? "Playback") + "\n" + (code == 0 ? "Playback ended." : $"Playback failed ({code}).") +
-            "\n" + string.Join("\n", LastReport.FallbackHistory);
+            HealthSummaryLine() + "\n" + string.Join("\n", LastReport.FallbackHistory);
         try { DiagnosticsStore.Save(LastReport); } catch (IOException) { StatusChanged?.Invoke("Playback ended; diagnostics could not be saved."); }
         return code;
     }
@@ -425,6 +435,18 @@ public sealed class PlaybackService
         }
     }
 
+    /// <summary>The final health of the attempt that ran last, plus the worst
+    /// condition it passed through when that differs.</summary>
+    private string HealthSummaryLine()
+    {
+        if (_finalHealth is not { } health) return "";
+        string line = "\n" + PlaybackHealthText.Describe(health.State);
+        if (health.WorstCondition is not (SustainedPlaybackHealth.Healthy or SustainedPlaybackHealth.Starting) &&
+            health.WorstCondition != health.State)
+            line += " (during playback: " + PlaybackHealthText.Describe(health.WorstCondition)["Playback health: ".Length..] + ")";
+        return line;
+    }
+
     private void Announce(string message)
     {
         if (LastReport is not null && !LastReport.FallbackHistory.Contains(message)) LastReport.FallbackHistory.Add(message);
@@ -450,6 +472,13 @@ public sealed class PlaybackService
         LastReport.Error = null;
         bool isNative = _nativeAttempts.ContainsKey(plan.PipeName);
         var clock = Stopwatch.StartNew();
+        // Every attempt, native or stable, gets a fresh monitor and classifier, so no
+        // earlier attempt's samples or verdict can reach this one.
+        string runtime = isNative && _nativeAttempts.TryGetValue(plan.PipeName, out var owner)
+            ? "native generation " + (owner.GenerationId ?? "unknown") : "stable player";
+        var health = new PlaybackHealthMonitor(Interlocked.Increment(ref _healthAttempts), plan.PipeName, runtime);
+        health.Transitioned += transition => ReportHealth(plan, health, transition);
+        _health = health;
         // Launch the exact immutable argument vector; do not probe or rebuild it here.
         Process? started;
         try
@@ -461,10 +490,17 @@ public sealed class PlaybackService
             // A native runtime that cannot be started is a health signal, not an
             // error for the user: the lane still has a fallback to try.
             DiagnosticsStore.Event("warning", "native-dv-launch", "The native runtime could not be started: " + ex.Message);
+            EndHealth(health, clock, false, -1);
             return (-1, false, clock.Elapsed);
+        }
+        catch
+        {
+            EndHealth(health, clock, false, -1);
+            throw;
         }
         if (started is null)
         {
+            EndHealth(health, clock, false, -1);
             if (isNative) return (-1, false, clock.Elapsed);
             throw new IOException("Could not start the player.");
         }
@@ -472,18 +508,46 @@ public sealed class PlaybackService
         DiagnosticsStore.Event("info", "player-started", "Player process started.");
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var cancellation = new CancellationTokenSource();
-        Task monitor = MonitorAsync(plan, stopAfterSeconds, cancellation.Token);
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task monitor = MonitorAsync(plan, stopAfterSeconds, cancellation.Token, connected, health);
+        Task sampling = health.RunAsync(connected.Task, clock, cancellation.Token);
         await process.WaitForExitAsync();
         DiagnosticsStore.Event("info", "player-exited", "Player process exited.");
         cancellation.Cancel();
         try { await monitor; } catch (OperationCanceledException) { }
+        try { await sampling; } catch (OperationCanceledException) { }
+        EndHealth(health, clock, true, process.ExitCode);
         DiagnosticsStore.Event("info", "monitor-ended", "Player observation ended.");
         await stdout; string error = await stderr;
         if (process.ExitCode != 0) { LastReport!.Error = error; DiagnosticsStore.Event("error", "playback-exit", $"mpv exited with {process.ExitCode}"); }
         return (process.ExitCode, true, clock.Elapsed);
     }
 
-    private async Task MonitorAsync(PlaybackPlan plan, double? stopAfterSeconds, CancellationToken cancellation)
+    /// <summary>Close an attempt's health with how its process ended, and keep the
+    /// final snapshot in the report. Only this attempt's monitor is ever finished.</summary>
+    private void EndHealth(PlaybackHealthMonitor health, Stopwatch clock, bool started, int exitCode)
+    {
+        health.Finish(clock.Elapsed, started, exitCode);
+        var snapshot = health.Snapshot();
+        _finalHealth = snapshot;
+        if (ReferenceEquals(_health, health)) _health = null;
+        LastReport?.PlaybackHealth.Add(PlaybackHealthReport.From(snapshot, health.Runtime));
+    }
+
+    /// <summary>One line per transition, never per poll.</summary>
+    private void ReportHealth(PlaybackPlan plan, PlaybackHealthMonitor health, PlaybackHealthTransition transition)
+    {
+        bool concerning = transition.To is SustainedPlaybackHealth.SustainedDegradation or SustainedPlaybackHealth.Stalled or
+            SustainedPlaybackHealth.Frozen or SustainedPlaybackHealth.RuntimeFailure or SustainedPlaybackHealth.SourceFailure;
+        DiagnosticsStore.Event(concerning ? "warning" : "info", "playback-health",
+            $"{transition.From} -> {transition.To} at {transition.At.TotalSeconds:0.0} s: {transition.Reason} " +
+            $"(attempt={health.AttemptId}, runtime={health.Runtime})");
+        if (!PlaybackHealthClassifier.IsTerminal(transition.To))
+            StatusChanged?.Invoke(plan.Summary + "\n" + PlaybackHealthText.Describe(transition.To));
+    }
+
+    private async Task MonitorAsync(PlaybackPlan plan, double? stopAfterSeconds, CancellationToken cancellation,
+        TaskCompletionSource connectedSignal, PlaybackHealthMonitor health)
     {
         try
         {
@@ -492,6 +556,7 @@ public sealed class PlaybackService
             await ipc.ConnectAsync(connectTimeout.Token);
             DiagnosticsStore.Event("info", "ipc-connected", "Player observation connected.");
             if (_nativeAttempts.TryGetValue(plan.PipeName, out var connected)) connected.IpcConnected = true;
+            connectedSignal.TrySetResult();
             var timer = Stopwatch.StartNew();
             while (!cancellation.IsCancellationRequested)
             {
@@ -560,11 +625,12 @@ public sealed class PlaybackService
                     }
                 }
                 if (LastReport!.Observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
-                    StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString());
+                    StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString() + "\n" + PlaybackHealthText.Describe(health.Snapshot().State));
                 if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds)
                 {
                     bool stopped = await ipc.CommandSucceededAsync(["quit"], queryTimeout.Token);
                     if (attempt is not null) attempt.StopRequested = stopped;
+                    if (stopped) health.MarkStopRequested();
                     return;
                 }
                 await Task.Delay(1000, cancellation);

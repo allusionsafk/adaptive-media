@@ -173,6 +173,15 @@ internal static class PlaybackRecoveryTests
                 check(service.LastReport.FallbackHistory.Where(x => x.Contains("composition active")).All(x => x.StartsWith("Earlier native attempt")), "RECOVERY: prior composition is explicitly historical in the final report");
                 check(service.LastNativeObservation is null && !service.LastReport.Observed.ContainsKey("hwdec-current"), "RECOVERY: stable result retains no native FEL or hwdec claim");
                 check(service.LastReport.MpvVersion == "stable-protocol-peer", "RECOVERY: final runtime identity comes from the active attempt");
+                var healths = service.LastReport.PlaybackHealth;
+                check(healths.Count == 3 && healths.Select(x => x.Attempt).Distinct().Count() == 3 &&
+                      healths[0].Runtime.Contains(a.VersionId) && healths[1].Runtime.Contains(b.VersionId) && healths[2].Runtime == "stable player",
+                    "SUSTAINED HEALTH: every attempt, native and stable, has its own health record and runtime identity");
+                check(healths[0].State == nameof(SustainedPlaybackHealth.RuntimeFailure) && healths[2].State == nameof(SustainedPlaybackHealth.UserStopped) &&
+                      service.LastPlaybackHealth?.State == SustainedPlaybackHealth.UserStopped,
+                    "SUSTAINED HEALTH: a failed native attempt's health is not donated to the stable attempt that followed");
+                check(healths.All(x => !x.PlaybackProgressed && x.StallEpisodes == 0 && x.FreezeEpisodes == 0),
+                    "SUSTAINED HEALTH: a peer that never reports position is never called healthy, stalled or frozen");
             }
             if (only is null or "outcomes")
             {
@@ -184,6 +193,8 @@ internal static class PlaybackRecoveryTests
                     await service.LaunchAsync(plan, 0);
                     check(service.LastReport!.Attempts.Count == 1 && service.NativeHealth.FaultCount(a.VersionId) == 0,
                         "RECOVERY: production " + outcome + " outcome never poisons a runtime or retries");
+                    if (outcome == "media") check(service.LastPlaybackHealth?.State == SustainedPlaybackHealth.SourceFailure &&
+                        service.LastNativeHealth?.Health == NativeDvHealth.SourceNotPlayable, "SUSTAINED HEALTH: a media refusal is SourceFailure alongside the unchanged native verdict");
                 }
             }
             if (only is null or "unprotected")

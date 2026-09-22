@@ -15,6 +15,8 @@
     <!-- The real orchestration, so the rollback path can be exercised end to end
          rather than re-implemented in the test. None of these touch WPF. -->
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackService.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealth.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealthMonitor.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SessionDiagnostics.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/HdrSession.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/NativeDisplay.cs" />
