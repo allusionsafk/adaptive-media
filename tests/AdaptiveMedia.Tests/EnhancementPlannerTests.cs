@@ -108,6 +108,52 @@ internal static class EnhancementPlannerTests
         Check(first == second && first.Reasons.SequenceEqual(second.Reasons),
             "DETERMINISM: identical immutable inputs produce identical decisions and reasons");
 
+        PlaybackPlan SemanticPlan(EnhancementIntent intent, PlaybackCapabilities? capabilities = null,
+            PlaybackTarget? target = null) => PlaybackPlanBuilder.Build("mpv.exe", "config", ["movie.mp4"],
+                new PlaybackOptions(intent.Mode.ToString(), "Off", "Off", false, false, Intent: intent),
+                source1080, target ?? output1440, capabilities ?? rtx, "semantic-test");
+
+        var semanticNvidia = SemanticPlan(Enhanced());
+        Check(semanticNvidia.Intent == Enhanced() && semanticNvidia.Decision?.Detail == DetailImplementation.NvidiaVpp &&
+              semanticNvidia.RtxSrConstructed && semanticNvidia.Arguments.Contains("--hwdec=d3d11va") &&
+              semanticNvidia.Arguments.Any(x => x.Contains("d3d11vpp=scale=1.333333:scaling-mode=nvidia", StringComparison.Ordinal)) &&
+              semanticNvidia.Arguments.Contains("--vo=gpu-next"),
+            "PLAN: maximum-detail intent translates to the established D3D11VA to NVIDIA VPP to gpu-next path");
+
+        var semanticConventional = SemanticPlan(Enhanced(), new(false, false));
+        Check(semanticConventional.Decision?.Detail == DetailImplementation.Conventional &&
+              !semanticConventional.RtxSrConstructed && semanticConventional.Arguments.Contains("--scale=ewa_lanczossharp"),
+            "PLAN: ineligible NVIDIA intent translates to conventional libplacebo scaling");
+
+        var cadencePlan = SemanticPlan(Enhanced(motion: MotionIntent.CadenceCorrected), target: new(2560, 1440, RefreshRateHz: 60));
+        Check(cadencePlan.Decision?.Motion == MotionImplementation.CadenceCorrected &&
+              cadencePlan.Arguments.Contains("--video-sync=display-resample") &&
+              !cadencePlan.Arguments.Contains("--interpolation=yes"),
+            "PLAN: CadenceCorrected requests display resampling without temporal blending");
+
+        var blendPlan = SemanticPlan(Enhanced(motion: MotionIntent.BlendSmooth));
+        Check(blendPlan.Decision?.Motion == MotionImplementation.BlendSmooth &&
+              blendPlan.Arguments.Contains("--interpolation=yes") && blendPlan.Arguments.Any(x => x.StartsWith("--tscale=")),
+            "PLAN: BlendSmooth emits the existing mpv temporal interpolation request");
+
+        var noEvidence = new PlaybackAttemptEvidence(501, 1, semanticNvidia, PlaybackAttemptKind.Stable, "stable player") { Started = true };
+        var nvidiaTruth = PlaybackTruthBuilder.Build(noEvidence, [], []);
+        Check(nvidiaTruth.Intent.Lines.Any(x => x.Contains("Maximum detail", StringComparison.OrdinalIgnoreCase)) &&
+              nvidiaTruth.Requested.Lines.Contains("RTX Super Resolution") &&
+              nvidiaTruth.Planned.Lines.Contains("NVIDIA D3D11 VPP") &&
+              !nvidiaTruth.Observed.Lines.Any(x => x.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) ||
+                                                  x.Contains("RTX", StringComparison.OrdinalIgnoreCase)),
+            "TRUTH: intent, requested, and planned NVIDIA state never populate Observed without evidence");
+
+        var futureRequest = SemanticPlan(Enhanced(motion: MotionIntent.NeuralMotion));
+        var futureEvidence = new PlaybackAttemptEvidence(502, 1, futureRequest, PlaybackAttemptKind.Stable, "stable player") { Started = true };
+        var futureTruth = PlaybackTruthBuilder.Build(futureEvidence, [], []);
+        Check(futureRequest.Decision?.Motion == MotionImplementation.BlendSmooth &&
+              futureTruth.Requested.Lines.Any(x => x.Contains("Temporal blend", StringComparison.OrdinalIgnoreCase)) &&
+              !futureTruth.Planned.Lines.Any(x => x.Contains("Generated", StringComparison.OrdinalIgnoreCase) || x.Contains("Neural", StringComparison.OrdinalIgnoreCase)) &&
+              !futureTruth.Observed.Lines.Any(x => x.Contains("Generated", StringComparison.OrdinalIgnoreCase) || x.Contains("Neural", StringComparison.OrdinalIgnoreCase)),
+            "TRUTH: unsupported future motion requests report the supported blend tier and never claim execution");
+
         return count;
     }
 }

@@ -16,25 +16,21 @@ public sealed record PlaybackTarget(int Width, int Height, int Screen = 0, bool 
 public sealed record PlaybackCapabilities(bool Nvidia, bool Vpp, string? NvidiaAdapter = null, bool Rtx = false);
 public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Arguments, PlaybackOptions Requested,
     MediaInfo Source, PlaybackTarget Target, string Renderer, bool RtxSrConstructed, bool RtxHdrConstructed,
-    double Scale, ImmutableArray<string> Reasons, string PipeName)
+    double Scale, ImmutableArray<string> Reasons, string PipeName, EnhancementIntent? Intent = null,
+    EnhancementDecision? Decision = null)
 {
     public string ArgumentVectorSha256 => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
         System.Text.Encoding.UTF8.GetBytes(string.Join('\0', Arguments))));
     public string Summary => $"{(Source.Known ? $"{Source.Width} × {Source.Height}" : "Source dimensions unknown")} · {(Source.IsHdr ? "HDR" : "SDR / unspecified")}\n" +
-        (RtxSrConstructed ? $"RTX SR processing requested at {Scale:0.####}×" : Requested.UpscaleMode is "HighQuality" or "Automatic" or "RtxVsr" ? "High quality scaling" : "Standard scaling") +
-        $" · {Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Native cadence" }} · PCM audio" +
+        (RtxSrConstructed ? $"RTX Super Resolution requested at {Scale:0.####}×" : Decision?.Detail == DetailImplementation.Conventional || Requested.UpscaleMode is "HighQuality" or "Automatic" or "RtxVsr" ? "High-quality conventional scaling" : "Source-faithful scaling") +
+        $" · {Decision?.Motion switch { MotionImplementation.CadenceCorrected => "Cadence corrected", MotionImplementation.BlendSmooth => "Temporal blend smoothing", _ => Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Original motion" } }} · PCM audio" +
         (Reasons.IsEmpty ? "" : "\n" + string.Join("\n", Reasons));
 }
 
 public static class PlaybackPlanBuilder
 {
     public static double FitScale(MediaInfo source, PlaybackTarget target)
-    {
-        if (!source.Known || target.Width <= 0 || target.Height <= 0) return 1;
-        // VPP scales coded pixels uniformly. Leave anamorphic/rotated sources to libplacebo.
-        if (source.Aspect > 0 && Math.Abs(source.Aspect - (double)source.Width / source.Height) > 0.015) return 1;
-        return Math.Min((double)target.Width / source.Width, (double)target.Height / source.Height);
-    }
+        => EnhancementPlanner.FitScale(source, target);
 
     public static PlaybackPlan Build(string executable, string configDir, IReadOnlyList<string> items,
         PlaybackOptions options, MediaInfo source, PlaybackTarget target, PlaybackCapabilities capabilities,
@@ -45,10 +41,15 @@ public static class PlaybackPlanBuilder
             throw new ArgumentException("A media path contains an unsupported control character.");
         if (!new[] { "Automatic", "Reference", "Enhanced", "Compatibility" }.Contains(options.Profile) ||
             !new[] { "Off", "Automatic", "HighQuality", "RtxVsr" }.Contains(options.UpscaleMode) ||
-            !new[] { "Off", "Gentle", "Smooth" }.Contains(options.MotionMode) ||
+            !new[] { "Off", "Gentle", "Smooth", "Cadence" }.Contains(options.MotionMode) ||
             !new[] { "Legacy", "Off", "Gentle", "Normal", "Strong", "Automatic" }.Contains(options.CleanupMode))
             throw new ArgumentException("A playback setting is unavailable. Reset it in Settings.");
+        EnhancementDecision? decision = options.Intent is null ? null : EnhancementPlanner.Decide(options.Intent,
+            new(source, target, capabilities, items.Count));
+        EnhancementIntent? intent = options.Intent;
+        if (decision is not null) options = decision.ApplyTo(options);
         var reasons = ImmutableArray.CreateBuilder<string>();
+        if (decision is not null) reasons.AddRange(decision.Reasons);
         if (options.AutoHdrSwitch && items.Count > 1) reasons.Add("Windows HDR is preserved for playlists because later items may use different color formats.");
         double scale = FitScale(source, target);
         bool rtxRequested = options.UpscaleMode == "RtxVsr";
@@ -116,13 +117,15 @@ public static class PlaybackPlanBuilder
         }
         if (options.MotionMode != "Off")
         {
-            args.AddRange(new string[] { "--video-sync=display-resample", "--video-sync-max-factor=10", "--interpolation=yes",
-                "--tscale=" + (options.MotionMode == "Gentle" ? "oversample" : "linear") });
+            args.AddRange(new string[] { "--video-sync=display-resample", "--video-sync-max-factor=10" });
+            if (options.MotionMode != "Cadence")
+                args.AddRange(new string[] { "--interpolation=yes", "--tscale=" + (options.MotionMode == "Gentle" ? "oversample" : "linear") });
             if (!compatible && !rtxLane) args.Add("--vulkan-swap-mode=fifo");
         }
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);
-        return new(executable, args.ToImmutable(), options, source, target, renderer, sr, hdr, scale, reasons.ToImmutable(), pipeName);
+        return new(executable, args.ToImmutable(), options, source, target, renderer, sr, hdr, scale, reasons.ToImmutable(), pipeName,
+            intent, decision);
     }
 }
 

@@ -42,7 +42,9 @@ public static class DiagnosticsStore
     {
         Directory.CreateDirectory(DirectoryPath);
         // Do not serialize media arguments, custom URL formats, pipe identifiers or personal config paths.
-        object? ShareablePlan(PlaybackPlan? p) => p is not null ? new { p.Requested.Profile, p.Requested.UpscaleMode, p.Requested.MotionMode,
+        object? ShareablePlan(PlaybackPlan? p) => p is not null ? new { p.Intent, Decision = p.Decision is null ? null : new
+            { p.Decision.Detail, p.Decision.Motion, p.Decision.Cleanup, p.Decision.Cadence, p.Decision.Scale, p.Decision.Reasons },
+            p.Requested.Profile, p.Requested.UpscaleMode, p.Requested.MotionMode,
             p.Requested.Cleanup, p.Requested.CleanupMode, p.Requested.RtxHdr, p.Source, p.Target, p.Renderer, p.RtxSrConstructed,
             p.RtxHdrConstructed, p.Scale, p.Reasons, p.ArgumentVectorSha256,
             Arguments = p.Arguments.TakeWhile(x => x != "--").Select(x => x.StartsWith("--config-dir=") ? "--config-dir=[managed]" :

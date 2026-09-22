@@ -173,8 +173,14 @@ public sealed class PlaybackService
         var selected = system.Screens.ElementAtOrDefault(screen);
         bool hdrEnabled = displays.Length == 1 && displays[0].Supported && displays[0].Enabled && !displays[0].ForceDisabled;
         bool fullscreen = system.Screens.Length > 1 && selected is { Primary: false } && settings.FullscreenExternal;
+        double? refreshRate = displays.Length == 1 && displays[0].RefreshRateHz > 0 ? displays[0].RefreshRateHz : null;
         var target = destination ?? new PlaybackTarget(selected is null ? 0 : fullscreen ? selected.Width : (int)(selected.WorkWidth * .8),
-            selected is null ? 0 : fullscreen ? selected.Height : (int)(selected.WorkHeight * .8), screen, fullscreen, hdrEnabled);
+            selected is null ? 0 : fullscreen ? selected.Height : (int)(selected.WorkHeight * .8), screen, fullscreen, hdrEnabled, refreshRate);
+        var playbackCapabilities = new PlaybackCapabilities(system.HasNvidia, capability.Vpp, system.NvidiaAdapter,
+            system.NvidiaAdapter?.Contains("RTX", StringComparison.OrdinalIgnoreCase) == true);
+        EnhancementDecision? enhancementDecision = options.Intent is null ? null : EnhancementPlanner.Decide(options.Intent,
+            new(source, target, playbackCapabilities, expanded.Count));
+        PlaybackOptions effectiveOptions = enhancementDecision?.ApplyTo(options) ?? options;
         // The native Dolby Vision lane is opt-in, applies to a single local file, and
         // produces a plan only once a provisioned runtime has validated. Any refusal
         // falls through to the established stable path with the reason recorded.
@@ -230,11 +236,11 @@ public sealed class PlaybackService
 
                 DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision runtime selected.");
                 var nativePlan = new PlaybackPlan(outcome.Plan.Executable!, outcome.Plan.Arguments,
-                    options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
+                    effectiveOptions with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
                     "Native Dolby Vision gpu-next", false, false, 1,
-                    [outcome.Plan.Explanation,
+                    [.. enhancementDecision?.Reasons ?? [], outcome.Plan.Explanation,
                      "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts."],
-                    nativePipe);
+                    nativePipe, options.Intent, enhancementDecision);
                 if (_preparedReports.Count >= 32) _preparedReports.Clear();
                 if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
                 _nativeSelections[nativePipe] = new(outcome,
@@ -248,7 +254,7 @@ public sealed class PlaybackService
             nativeNote = "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason");
         }
         var plan = PlaybackPlanBuilder.Build(mpv, Path.Combine(AppContext.BaseDirectory, "mpv-config"), expanded, options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
-            new(system.HasNvidia, capability.Vpp, system.NvidiaAdapter, system.NvidiaAdapter?.Contains("RTX", StringComparison.OrdinalIgnoreCase) == true),
+            playbackCapabilities,
             "adaptive-media-" + Guid.NewGuid().ToString("N"), settings.HdmiBitstream, HasStreamHelper(system));
         if (_preparedReports.Count >= 32) { _preparedReports.Clear(); _preparedNotes.Clear(); }
         if (nativeNote is not null) _preparedNotes[plan.PipeName] = nativeNote;
