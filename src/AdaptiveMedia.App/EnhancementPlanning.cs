@@ -102,6 +102,13 @@ public static class EnhancementPreferences
                 Parse(strength, EnhancementStrength.Normal), Parse(performance, PerformanceIntent.Balanced)),
         };
     }
+
+    public static EnhancementIntent IntentFor(string profile, AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return IntentFor(profile, settings.AutomaticGoal, settings.AutomaticStrength, settings.EnhancedDetail,
+            settings.EnhancedMotion, settings.EnhancedCleanup, settings.EnhancementPerformance);
+    }
 }
 
 public static class EnhancementPlanner

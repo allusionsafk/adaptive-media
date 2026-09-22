@@ -102,6 +102,20 @@ internal static class EnhancementPlannerTests
             "Maximum", "NeuralMotion", "Clean", "MaximumQuality");
         Check(staleReference == EnhancementIntent.ForReference(),
             "REFERENCE: stale aggressive saved values cannot leak into reference intent");
+        var savedPreferences = new AppSettings
+        {
+            Profile = "Automatic", AutomaticGoal = "SmootherMotion", AutomaticStrength = "Strong",
+            EnhancedDetail = "Maximum", EnhancedMotion = "Original", EnhancedCleanup = "Clean",
+            EnhancementPerformance = "Efficient",
+        };
+        var savedAutomatic = EnhancementPreferences.IntentFor(savedPreferences.Profile, savedPreferences);
+        Check(savedAutomatic == EnhancementIntent.ForAutomatic(AutomaticGoal.SmootherMotion,
+                EnhancementStrength.Strong, PerformanceIntent.Efficient),
+            "UI: persisted Automatic controls translate to goal-oriented intent");
+        var savedEnhanced = EnhancementPreferences.IntentFor("Enhanced", savedPreferences);
+        Check(savedEnhanced == EnhancementIntent.ForEnhanced(DetailIntent.Maximum, MotionIntent.Original,
+                CleanupIntent.Clean, PerformanceIntent.Efficient),
+            "UI: persisted Enhanced controls translate to four independent dimensions");
 
         var first = EnhancementPlanner.Decide(Enhanced(), Environment());
         var second = EnhancementPlanner.Decide(Enhanced(), Environment());

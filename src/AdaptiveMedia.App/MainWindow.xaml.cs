@@ -51,10 +51,9 @@ public partial class MainWindow : Window
         SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
         Closing += (_, e) => { if (_playing) { e.Cancel = true; _closeAfterPlayback = true; Hide(); } };
         Closed += (_, _) => { _closed = true; _previewCancellation?.Cancel(); SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged; };
-        foreach (var box in new[] { ProfileBox, UpscaleBox, MotionBox, CleanupBox })
+        foreach (var box in new[] { ProfileBox, AutomaticGoalBox, AutomaticStrengthBox, AutomaticPerformanceBox,
+                     EnhancedDetailBox, EnhancedMotionBox, EnhancedCleanupBox, EnhancedPerformanceBox })
             box.SelectionChanged += OptionsChanged;
-        RtxHdrCheck.Checked += OptionsChanged;
-        RtxHdrCheck.Unchecked += OptionsChanged;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -86,11 +85,14 @@ public partial class MainWindow : Window
         bool ready = _uiReady;
         _uiReady = false;
         SelectCombo(ProfileBox, _settings.Profile);
-        SelectCombo(UpscaleBox, _settings.DefaultUpscaleMode);
-        SelectCombo(MotionBox, _settings.DefaultMotionMode);
-        SelectCombo(CleanupBox, _settings.DefaultCleanupMode == "Legacy"
-            ? (_settings.DefaultCleanup ? "Normal" : "Off") : _settings.DefaultCleanupMode);
-        RtxHdrCheck.IsChecked = _settings.DefaultRtxHdr;
+        SelectCombo(AutomaticGoalBox, _settings.AutomaticGoal);
+        SelectCombo(AutomaticStrengthBox, _settings.AutomaticStrength);
+        SelectCombo(AutomaticPerformanceBox, _settings.EnhancementPerformance);
+        SelectCombo(EnhancedDetailBox, _settings.EnhancedDetail);
+        SelectCombo(EnhancedMotionBox, _settings.EnhancedMotion);
+        SelectCombo(EnhancedCleanupBox, _settings.EnhancedCleanup);
+        SelectCombo(EnhancedPerformanceBox, _settings.EnhancementPerformance);
+        UpdatePreferenceVisibility();
         _uiReady = ready;
     }
 
@@ -108,10 +110,15 @@ public partial class MainWindow : Window
         }
     }
 
-    private PlaybackOptions CurrentOptions() => new(
-        ComboValue(ProfileBox), ComboValue(UpscaleBox), ComboValue(MotionBox),
-        ComboValue(CleanupBox) != "Off", RtxHdrCheck.IsChecked == true, _pendingFormat,
-        AutoHdrSwitch: _settings.AutoHdrSwitch, CleanupMode: ComboValue(CleanupBox));
+    private PlaybackOptions CurrentOptions()
+    {
+        string profile = ComboValue(ProfileBox);
+        string performance = profile == "Enhanced" ? ComboValue(EnhancedPerformanceBox) : ComboValue(AutomaticPerformanceBox);
+        var intent = EnhancementPreferences.IntentFor(profile, ComboValue(AutomaticGoalBox), ComboValue(AutomaticStrengthBox),
+            ComboValue(EnhancedDetailBox), ComboValue(EnhancedMotionBox), ComboValue(EnhancedCleanupBox), performance);
+        return new(profile, "Off", "Off", false, _settings.DefaultRtxHdr, _pendingFormat,
+            AutoHdrSwitch: _settings.AutoHdrSwitch, CleanupMode: "Off", Intent: intent);
+    }
 
     private void ShowSettingsWarning()
     {
@@ -122,11 +129,13 @@ public partial class MainWindow : Window
     private void SavePlaybackDefaults()
     {
         _settings.Profile = ComboValue(ProfileBox);
-        _settings.DefaultUpscaleMode = ComboValue(UpscaleBox);
-        _settings.DefaultMotionMode = ComboValue(MotionBox);
-        _settings.DefaultCleanupMode = ComboValue(CleanupBox);
-        _settings.DefaultCleanup = ComboValue(CleanupBox) != "Off";
-        _settings.DefaultRtxHdr = RtxHdrCheck.IsChecked == true;
+        _settings.AutomaticGoal = ComboValue(AutomaticGoalBox);
+        _settings.AutomaticStrength = ComboValue(AutomaticStrengthBox);
+        _settings.EnhancedDetail = ComboValue(EnhancedDetailBox);
+        _settings.EnhancedMotion = ComboValue(EnhancedMotionBox);
+        _settings.EnhancedCleanup = ComboValue(EnhancedCleanupBox);
+        _settings.EnhancementPerformance = _settings.Profile == "Enhanced"
+            ? ComboValue(EnhancedPerformanceBox) : ComboValue(AutomaticPerformanceBox);
         SettingsStore.Save(_settings);
         ShowSettingsWarning();
     }
@@ -160,7 +169,22 @@ public partial class MainWindow : Window
 
     private async void OptionsChanged(object sender, RoutedEventArgs e)
     {
+        if (ReferenceEquals(sender, ProfileBox)) UpdatePreferenceVisibility();
         if (_uiReady && !_playing) await RefreshPreviewAsync(debounce: true);
+    }
+
+    private void UpdatePreferenceVisibility()
+    {
+        string profile = ComboValue(ProfileBox);
+        AutomaticChoices.Visibility = AutomaticPerformanceRow.Visibility = profile == "Automatic" ? Visibility.Visible : Visibility.Collapsed;
+        EnhancedChoices.Visibility = profile == "Enhanced" ? Visibility.Visible : Visibility.Collapsed;
+        ModeExplanation.Text = profile switch
+        {
+            "Reference" => "Preserves source character and avoids discretionary enhancement. Required format and display conversion remains available.",
+            "Enhanced" => "Choose each result independently. The plan explains any supported fallback before playback.",
+            "Compatibility" => "Uses the conservative fallback renderer for troublesome files or drivers.",
+            _ => "DemiMedia combines your priority, strength, source, display, and supported hardware into one explainable plan.",
+        };
     }
 
     private async Task SelectMediaAsync(IReadOnlyList<string> items, string? format = null)
