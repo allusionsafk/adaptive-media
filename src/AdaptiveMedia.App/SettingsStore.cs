@@ -79,6 +79,7 @@ internal static class SettingsStore
         }
         if (settings.SchemaVersion < 0) warnings.Add(nameof(settings.SchemaVersion));
         settings.SchemaVersion = AppSettings.CurrentSchemaVersion;
+        MapMissingEnhancementPreferences(settings, root);
         Validate(settings, warnings);
         if (warnings.Count > 0) LastWarning = "Some saved settings were unavailable or invalid and now use safe defaults: " + string.Join(", ", warnings.Distinct()) + ".";
         return settings;
@@ -97,7 +98,46 @@ internal static class SettingsStore
         settings.DefaultUpscaleMode = Choice(settings.DefaultUpscaleMode, "Off", nameof(settings.DefaultUpscaleMode), "Off", "Automatic", "HighQuality", "RtxVsr");
         settings.DefaultCleanupMode = Choice(settings.DefaultCleanupMode, "Legacy", nameof(settings.DefaultCleanupMode), "Legacy", "Off", "Gentle", "Normal", "Strong", "Automatic");
         settings.DefaultMotionMode = Choice(settings.DefaultMotionMode, "Off", nameof(settings.DefaultMotionMode), "Off", "Gentle", "Smooth");
+        settings.AutomaticGoal = Choice(settings.AutomaticGoal, "BalancedImprovement", nameof(settings.AutomaticGoal),
+            "PreserveOriginal", "ImproveDetail", "SmootherMotion", "CleanImage", "BalancedImprovement");
+        settings.AutomaticStrength = Choice(settings.AutomaticStrength, "Normal", nameof(settings.AutomaticStrength), "Subtle", "Normal", "Strong");
+        settings.EnhancedDetail = Choice(settings.EnhancedDetail, "Balanced", nameof(settings.EnhancedDetail),
+            "Preserve", "Balanced", "Sharper", "Maximum", "Automatic");
+        settings.EnhancedMotion = Choice(settings.EnhancedMotion, "Original", nameof(settings.EnhancedMotion),
+            "Original", "CadenceCorrected", "BlendSmooth", "GeneratedMotion", "NeuralMotion", "Automatic");
+        settings.EnhancedCleanup = Choice(settings.EnhancedCleanup, "Balanced", nameof(settings.EnhancedCleanup),
+            "PreserveTexture", "Balanced", "Clean", "Automatic");
+        settings.EnhancementPerformance = Choice(settings.EnhancementPerformance, "Balanced", nameof(settings.EnhancementPerformance),
+            "Efficient", "Balanced", "MaximumQuality");
         settings.SchemaVersion = AppSettings.CurrentSchemaVersion;
+    }
+
+    private static void MapMissingEnhancementPreferences(AppSettings settings, JsonElement root)
+    {
+        bool Has(string name) => root.EnumerateObject().Any(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (!Has(nameof(AppSettings.AutomaticGoal))) settings.AutomaticGoal = "BalancedImprovement";
+        if (!Has(nameof(AppSettings.AutomaticStrength))) settings.AutomaticStrength = "Normal";
+        if (!Has(nameof(AppSettings.EnhancedDetail))) settings.EnhancedDetail = settings.DefaultUpscaleMode switch
+        {
+            "RtxVsr" => "Maximum",
+            "HighQuality" => "Sharper",
+            "Automatic" => "Automatic",
+            _ => "Balanced",
+        };
+        if (!Has(nameof(AppSettings.EnhancedMotion))) settings.EnhancedMotion = settings.DefaultMotionMode switch
+        {
+            "Gentle" or "Smooth" => "BlendSmooth",
+            _ => "Original",
+        };
+        if (!Has(nameof(AppSettings.EnhancedCleanup))) settings.EnhancedCleanup = settings.DefaultCleanupMode switch
+        {
+            "Off" => "PreserveTexture",
+            "Strong" => "Clean",
+            "Gentle" or "Normal" or "Automatic" => "Balanced",
+            _ => settings.DefaultCleanup ? "Balanced" : "PreserveTexture",
+        };
+        if (!Has(nameof(AppSettings.EnhancementPerformance))) settings.EnhancementPerformance =
+            settings.DefaultUpscaleMode == "RtxVsr" ? "MaximumQuality" : "Balanced";
     }
 
     private static bool HasUnsupportedSchema(JsonElement root)

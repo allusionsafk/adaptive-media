@@ -2,6 +2,8 @@
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" Link="Models.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" Link="PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" Link="EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" Link="SettingsStore.cs" />
   </ItemGroup>
 </Project>
