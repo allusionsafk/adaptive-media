@@ -81,7 +81,7 @@ public sealed class PlaybackHealthMonitor
                 await Task.Delay(_policy.SampleInterval, token);
             }
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (OperationCanceledException) { }
         finally { if (ipc is not null) await ipc.DisposeAsync(); }
     }
 
@@ -103,8 +103,11 @@ public sealed class PlaybackHealthMonitor
             foreach (string name in Properties)
                 if (await ipc.CommandAsync(["get_property", name], timeout.Token) is { } value) values[name] = value;
         }
-        catch (Exception ex) when (!token.IsCancellationRequested &&
-            ex is IOException or OperationCanceledException or TimeoutException or JsonException or InvalidOperationException or UnauthorizedAccessException)
+        // Including while the attempt is being cancelled: a player closing breaks
+        // this connection as a matter of course, and observing health must never
+        // be able to fail the playback it is only watching.
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or TimeoutException or
+            JsonException or InvalidOperationException or UnauthorizedAccessException or ObjectDisposedException)
         {
             // No answer inside the budget. The connection is discarded, never
             // reused mid-reply, and this poll is recorded as unanswered.

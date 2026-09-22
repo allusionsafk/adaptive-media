@@ -90,6 +90,29 @@ public sealed class PlaybackService
     /// <summary>What automatic recovery did during the most recent playback, if anything.</summary>
     public PlaybackRecoveryRecord? LastRecovery { get; private set; }
 
+    /// <summary>Guards the per-playback truth state (attempt evidence and recovery
+    /// records), which the playback loop writes and the UI reads.</summary>
+    private readonly object _truthGate = new();
+    private PlaybackAttemptEvidence? _evidence;
+    private readonly List<PlaybackAttemptEvidence> _attemptEvidence = [];
+    private bool _playbackFelRequested;
+    private IReadOnlyList<string> _playbackNotes = [];
+    /// <summary>Why the native lane was not used, per prepared stable plan.</summary>
+    private readonly Dictionary<string, string> _preparedNotes = [];
+
+    /// <summary>The truth chain for the current (or most recent) playback: what was
+    /// requested, planned and observed, its health, and what recovery really did.
+    /// Observed comes only from the current attempt's own evidence.</summary>
+    public PlaybackTruthReport? CurrentTruth()
+    {
+        lock (_truthGate)
+        {
+            if (_evidence is null) return null;
+            return PlaybackTruthBuilder.Build(_evidence, _attemptEvidence.ToArray(),
+                LastReport?.Recovery.ToArray() ?? [], _playbackNotes);
+        }
+    }
+
     /// <summary>What one attempt established: how it ended, and whether it claimed
     /// the playback's recovery, with the resume point it confirmed itself.</summary>
     private sealed record AttemptRun(int ExitCode, bool Started, TimeSpan Lifetime,
@@ -155,6 +178,7 @@ public sealed class PlaybackService
         // The native Dolby Vision lane is opt-in, applies to a single local file, and
         // produces a plan only once a provisioned runtime has validated. Any refusal
         // falls through to the established stable path with the reason recorded.
+        string? nativeNote = null;
         if (NativeDolbyVision is not null && settings.NativeDolbyVisionLane && expanded.Count == 1 && File.Exists(expanded[0]))
         {
             string nativePipe = "adaptive-media-native-" + Guid.NewGuid().ToString("N");
@@ -221,11 +245,13 @@ public sealed class PlaybackService
                 return nativePlan;
             }
             DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason"));
+            nativeNote = "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason");
         }
         var plan = PlaybackPlanBuilder.Build(mpv, Path.Combine(AppContext.BaseDirectory, "mpv-config"), expanded, options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
             new(system.HasNvidia, capability.Vpp, system.NvidiaAdapter, system.NvidiaAdapter?.Contains("RTX", StringComparison.OrdinalIgnoreCase) == true),
             "adaptive-media-" + Guid.NewGuid().ToString("N"), settings.HdmiBitstream, HasStreamHelper(system));
-        if (_preparedReports.Count >= 32) _preparedReports.Clear();
+        if (_preparedReports.Count >= 32) { _preparedReports.Clear(); _preparedNotes.Clear(); }
+        if (nativeNote is not null) _preparedNotes[plan.PipeName] = nativeNote;
         _preparedReports[plan.PipeName] = new() { Plan = plan, MpvVersion = capability.Version, Summary = plan.Summary,
             Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens, system.Audio, system.Power,
                 Topology = "GPU inventory does not establish display ownership. VRR and endpoint bitstream support are unknown." } };
@@ -247,6 +273,16 @@ public sealed class PlaybackService
         // One gate per playback: however many attempts this playback makes, each
         // may trigger recovery at most once, and only while it is the active one.
         var gate = new PlaybackRecoveryGate();
+        lock (_truthGate)
+        {
+            // A new playback starts with no evidence at all; nothing from the last
+            // one can appear in this one's truth chain.
+            _evidence = null;
+            _attemptEvidence.Clear();
+            _playbackFelRequested = _nativeSelections.TryGetValue(plan.PipeName, out var nativeSelection) &&
+                nativeSelection.Outcome.Plan?.Request?.EnhancementLayer == true;
+            _playbackNotes = _preparedNotes.TryGetValue(plan.PipeName, out var note) ? [note] : [];
+        }
         LastReport = new() { Plan = plan, Summary = plan.Summary, MpvVersion = prepared?.MpvVersion ?? "unknown", Hardware = prepared?.Hardware };
         using var hdrSession = HdrSession.Begin(plan, LastReport);
         DiagnosticsStore.Event("info", "playback-plan", plan.Renderer);
@@ -261,6 +297,7 @@ public sealed class PlaybackService
                 LastReport.Summary = (LastReport.Plan?.Summary ?? "Playback") + "\n" +
                     (native.ExitCode == 0 ? "Playback ended." : $"Playback failed ({native.ExitCode}).") +
                     HealthSummaryLine() + "\n" + string.Join("\n", LastReport.FallbackHistory);
+                LastReport.TruthChain = CurrentTruth()?.Format();
                 try { DiagnosticsStore.Save(LastReport); }
                 catch (IOException) { StatusChanged?.Invoke("Playback ended; diagnostics could not be saved."); }
                 return native.ExitCode;
@@ -294,6 +331,7 @@ public sealed class PlaybackService
         LastReport.ExitCode = code;
         LastReport.Summary = (LastReport.Plan?.Summary ?? "Playback") + "\n" + (code == 0 ? "Playback ended." : $"Playback failed ({code}).") +
             HealthSummaryLine() + "\n" + string.Join("\n", LastReport.FallbackHistory);
+        LastReport.TruthChain = CurrentTruth()?.Format();
         try { DiagnosticsStore.Save(LastReport); } catch (IOException) { StatusChanged?.Invoke("Playback ended; diagnostics could not be saved."); }
         return code;
     }
@@ -316,6 +354,11 @@ public sealed class PlaybackService
     {
         var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int rollbacks = 0;
+        // The resume point of a recovery still in progress. A replacement that
+        // never plays (it fails to start, or fails before useful playback) must not
+        // discard it: the failed attempt's confirmed position is still the most
+        // trustworthy place to continue from.
+        double? pendingResume = null;
 
         while (true)
         {
@@ -402,7 +445,7 @@ public sealed class PlaybackService
             NativeDvFallbackCandidate? fallback = null;
             NativeDvRollbackDecision decision;
             PlaybackRecoveryDecision? recovery = null;
-            double? resumeAt = null;
+            double? resumeAt = pendingResume;
             if (run.RecoveryTrigger is { } trigger)
             {
                 // A hard failure after playback had started. It spends the same
@@ -419,11 +462,12 @@ public sealed class PlaybackService
                 recovery = PlaybackRecoveryPolicy.Decide(trigger, true, kind, rollbacks,
                     NativeDvRollbackPolicy.MaximumRollbacks, fallback?.IsUsable, fallback?.Reason);
                 resumeAt = run.Health?.ResumePosition;
+                pendingResume = resumeAt;
                 decision = recovery.Step == PlaybackRecoveryStep.RetryOnPreviousNative
                     ? new(NativeDvNextStep.RetryOnPreviousRuntime, NativeDvPlaybackStatus.RolledBackToPreviousRuntime, recovery.Explanation)
                     : new(NativeDvNextStep.UseStablePlayback, rollbacks > 0
                         ? NativeDvPlaybackStatus.PreviousRuntimeAlsoFailed : NativeDvPlaybackStatus.PreviousRuntimeUnavailable, recovery.Explanation);
-                RecordRecovery(recovery, resumeAt, run, "native generation " + (attempt.GenerationId ?? "unknown"),
+                RecordRecovery(recovery, resumeAt, run, kind, "native generation " + (attempt.GenerationId ?? "unknown"),
                     recovery.Step == PlaybackRecoveryStep.RetryOnPreviousNative
                         ? "native generation " + (fallback?.GenerationId ?? "unknown") : "stable player");
             }
@@ -455,9 +499,13 @@ public sealed class PlaybackService
             // A recovery is described by what failed during playback; the startup
             // verdict of an attempt that played is not the reason and is left to
             // diagnostics.
-            if (recovery is null) Announce(verdict.Explanation);
-            Announce(decision.Explanation);
-            if (recovery is not null) Announce(PlaybackRecoveryText.Describe(recovery, resumeAt));
+            // A recovery is announced when its replacement really starts, as the
+            // path that launched; here only the startup path announces its decision.
+            if (recovery is null)
+            {
+                Announce(verdict.Explanation);
+                Announce(decision.Explanation);
+            }
 
             if (decision.Step == NativeDvNextStep.UseStablePlayback)
             {
@@ -473,6 +521,7 @@ public sealed class PlaybackService
             var retryDescriptor = fallback?.Descriptor;
             if (retryRuntime is null || retryDescriptor is null)
             {
+                RedirectRecoveryToStable("The retained native runtime could not be resolved for launch; recovering with stable playback.");
                 LastNativePlaybackStatus = NativeDvPlaybackStatus.PreviousRuntimeUnavailable;
                 Announce(NativeDvPlaybackStatusText.Describe(LastNativePlaybackStatus));
                 return new(false, run.ExitCode, WithResume(BuildStableFallbackPlan(plan), resumeAt));
@@ -484,6 +533,8 @@ public sealed class PlaybackService
                 NativeConfigDirectory, retryPipe, NativeFallbackLogPath, plan.Target);
             if (!retryOutcome.Selected || retryOutcome.Plan is not { Supported: true, Request: not null })
             {
+                RedirectRecoveryToStable("The retained native runtime validated, but no playback plan could be built for it (" +
+                    (retryOutcome.Reason ?? retryOutcome.Plan?.Explanation ?? "unknown reason") + "); recovering with stable playback.");
                 LastNativePlaybackStatus = NativeDvPlaybackStatus.PreviousRuntimeUnavailable;
                 Announce(NativeDvPlaybackStatusText.Describe(LastNativePlaybackStatus));
                 return new(false, run.ExitCode, WithResume(BuildStableFallbackPlan(plan), resumeAt));
@@ -527,19 +578,67 @@ public sealed class PlaybackService
         int split = arguments.IndexOf("--");
         arguments.Insert(split < 0 ? arguments.Count : split, PlaybackRecoveryText.StartArgument(at));
         return plan with { Arguments = [.. arguments],
-            Reasons = plan.Reasons.Add("Resumed at " + PlaybackRecoveryText.Position(at) + " after automatic recovery.") };
+            Reasons = plan.Reasons.Add("Resumed near " + PlaybackRecoveryText.Position(at) + " after automatic recovery.") };
     }
 
-    private void RecordRecovery(PlaybackRecoveryDecision decision, double? resumeAt, AttemptRun run, string failed, string target)
+    private void RecordRecovery(PlaybackRecoveryDecision decision, double? resumeAt, AttemptRun run, PlaybackAttemptKind failedKind,
+        string failed, string target)
     {
         var health = run.Health;
-        LastRecovery = new(health?.AttemptId ?? 0, failed, decision.Trigger.ToString(), decision.Step.ToString(),
-            resumeAt, target, decision.Explanation);
-        LastReport?.Recovery.Add(LastRecovery);
+        lock (_truthGate)
+        {
+            LastRecovery = new(health?.AttemptId ?? 0, failed, decision.Trigger.ToString(), decision.Step.ToString(),
+                resumeAt, target, decision.Explanation, failedKind);
+            LastReport?.Recovery.Add(LastRecovery);
+        }
         DiagnosticsStore.Event("warning", "playback-recovery",
             $"{decision.Step} after {decision.Trigger} (attempt={health?.AttemptId}, failed={failed}, target={target}, " +
             $"resume={(resumeAt is double r ? r.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "none")}, " +
             $"confirmedProgress={health?.PlaybackProgressed}): {decision.Explanation}");
+    }
+
+    /// <summary>The selected previous runtime could not be launched after all, so the
+    /// pending recovery is now a recovery to stable playback. Recorded before the
+    /// stable plan is even built, so no surface can claim the previous runtime.</summary>
+    private void RedirectRecoveryToStable(string explanation)
+    {
+        lock (_truthGate)
+        {
+            if (LastReport is null) return;
+            int index = LastReport.Recovery.FindLastIndex(r => r.LaunchedAttempt is null && r.Step == nameof(PlaybackRecoveryStep.RetryOnPreviousNative));
+            if (index < 0) return;
+            LastRecovery = LastReport.Recovery[index] = LastReport.Recovery[index] with
+            {
+                Step = nameof(PlaybackRecoveryStep.UseStablePlayback), Target = "stable player", Explanation = explanation,
+            };
+        }
+        DiagnosticsStore.Event("warning", "playback-recovery", explanation);
+    }
+
+    /// <summary>Bind the pending recovery to the attempt that actually started. Only
+    /// a replacement whose process really launched is ever reported as the path
+    /// recovery took, with the resume point from its own launched plan.</summary>
+    private void BindPendingRecovery(PlaybackAttemptEvidence started)
+    {
+        PlaybackRecoveryRecord? bound = null;
+        lock (_truthGate)
+        {
+            if (LastReport is null) return;
+            int index = LastReport.Recovery.FindLastIndex(r => r.LaunchedAttempt is null &&
+                r.Step != nameof(PlaybackRecoveryStep.NoRecoveryAvailable) && r.FailedAttempt != started.AttemptId);
+            if (index < 0) return;
+            double? resume = started.Plan.Arguments.TakeWhile(x => x != "--").LastOrDefault(x => x.StartsWith("--start=", StringComparison.Ordinal)) is { } start &&
+                double.TryParse(start[8..], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double at) ? at : null;
+            var record = LastReport.Recovery[index];
+            bound = record with
+            {
+                // The step follows what launched, whatever was selected.
+                Step = started.Kind == PlaybackAttemptKind.NativePrevious ? nameof(PlaybackRecoveryStep.RetryOnPreviousNative) : nameof(PlaybackRecoveryStep.UseStablePlayback),
+                LaunchedAttempt = started.AttemptId, LaunchedKind = started.Kind, LaunchedRuntime = started.Runtime, LaunchedResumeAt = resume,
+            };
+            LastRecovery = LastReport.Recovery[index] = bound;
+        }
+        Announce(PlaybackHealthText.Describe(Enum.Parse<SustainedPlaybackHealth>(bound.Trigger)) + "\nRecovery: " + PlaybackTruthBuilder.RecoveryOutcome(bound));
     }
 
     /// <summary>A stable attempt that failed hard is reported, never relaunched.</summary>
@@ -551,7 +650,7 @@ public sealed class PlaybackService
             : (SustainedPlaybackHealth?)null;
         if (trigger is null) return;
         var decision = PlaybackRecoveryPolicy.Decide(trigger.Value, true, PlaybackAttemptKind.Stable, 0, 0, null);
-        RecordRecovery(decision, null, run, "stable player", "none");
+        RecordRecovery(decision, null, run, PlaybackAttemptKind.Stable, "stable player", "none");
         Announce(PlaybackRecoveryText.Describe(decision, null));
     }
 
@@ -622,6 +721,19 @@ public sealed class PlaybackService
         gate.Activate(health.AttemptId);
         health.Transitioned += transition => ReportHealth(plan, health, transition);
         _health = health;
+        PlaybackAttemptEvidence evidence;
+        lock (_truthGate)
+        {
+            // This attempt's own evidence. The previous current attempt becomes
+            // history; nothing it observed can be read as this attempt's.
+            if (_evidence is not null && !_attemptEvidence.Contains(_evidence)) _attemptEvidence.Add(_evidence);
+            while (_attemptEvidence.Count > PlaybackTruthBuilder.MaximumHistory) _attemptEvidence.RemoveAt(0);
+            evidence = new PlaybackAttemptEvidence(health.AttemptId, LastReport.Attempts.Count, plan, kind, runtime,
+                isNative && _nativeSelections.TryGetValue(plan.PipeName, out var chosen) ? chosen.Outcome.Runtime?.MpvVersion : null,
+                isNative && _playbackFelRequested);
+            _evidence = evidence;
+        }
+        evidence.TrackHealth(health.Snapshot);
         // Launch the exact immutable argument vector; do not probe or rebuild it here.
         Process? started;
         try
@@ -634,11 +746,13 @@ public sealed class PlaybackService
             // error for the user: the lane still has a fallback to try.
             DiagnosticsStore.Event("warning", "native-dv-launch", "The native runtime could not be started: " + ex.Message);
             EndHealth(health, clock, false, -1);
+            evidence.Finish(health.Snapshot());
             gate.Retire(health.AttemptId);
             return new(-1, false, clock.Elapsed, null, health.Snapshot());
         }
         catch
         {
+            evidence.Finish(health.Snapshot());
             EndHealth(health, clock, false, -1);
             gate.Retire(health.AttemptId);
             throw;
@@ -646,12 +760,15 @@ public sealed class PlaybackService
         if (started is null)
         {
             EndHealth(health, clock, false, -1);
+            evidence.Finish(health.Snapshot());
             gate.Retire(health.AttemptId);
             if (isNative) return new(-1, false, clock.Elapsed, null, health.Snapshot());
             throw new IOException("Could not start the player.");
         }
         using var process = started;
         DiagnosticsStore.Event("info", "player-started", "Player process started.");
+        evidence.Started = true;
+        BindPendingRecovery(evidence);
         // A stall or freeze of playback that had started claims this playback's
         // recovery for this attempt, once, and stops exactly this process. Stable
         // playback has nowhere to go in V1, so it is only reported.
@@ -674,7 +791,7 @@ public sealed class PlaybackService
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var cancellation = new CancellationTokenSource();
         var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task monitor = MonitorAsync(plan, stopAfterSeconds, cancellation.Token, connected, health);
+        Task monitor = MonitorAsync(plan, stopAfterSeconds, cancellation.Token, connected, health, evidence, process);
         Task sampling = health.RunAsync(connected.Task, clock, cancellation.Token);
         await process.WaitForExitAsync();
         DiagnosticsStore.Event("info", "player-exited", "Player process exited.");
@@ -683,6 +800,7 @@ public sealed class PlaybackService
         try { await sampling; } catch (OperationCanceledException) { }
         await recoveryStop;
         EndHealth(health, clock, true, process.ExitCode);
+        evidence.Finish(health.Snapshot());
         var final = health.Snapshot();
         // A player that died after it had played claims recovery at exit — unless a
         // stall or freeze already claimed it, in which case this exit is the one
@@ -722,7 +840,7 @@ public sealed class PlaybackService
     }
 
     private async Task MonitorAsync(PlaybackPlan plan, double? stopAfterSeconds, CancellationToken cancellation,
-        TaskCompletionSource connectedSignal, PlaybackHealthMonitor health)
+        TaskCompletionSource connectedSignal, PlaybackHealthMonitor health, PlaybackAttemptEvidence evidence, Process process)
     {
         try
         {
@@ -738,7 +856,7 @@ public sealed class PlaybackService
                 using var queryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation); queryTimeout.CancelAfter(TimeSpan.FromSeconds(5));
                 foreach (string name in new[] { "mpv-version", "gpu-api", "gpu-context", "hwdec-current", "vf", "video-codec", "video-params", "video-out-params", "osd-dimensions",
                     "display-fps", "estimated-display-fps", "vsync-jitter", "frame-drop-count", "decoder-frame-drop-count", "vo-delayed-frame-count", "video-sync",
-                    "interpolation", "audio-out-params", "current-ao", "user-data/adaptive/state" })
+                    "interpolation", "audio-out-params", "current-ao", "current-vo", "video-target-params", "user-data/adaptive/state" })
                 {
                     var data = await ipc.CommandAsync(["get_property", name], queryTimeout.Token);
                     if (data.HasValue)
@@ -817,6 +935,9 @@ public sealed class PlaybackService
                         await ipc.CommandAsync(["set_property", "msg-level", "all=no"], queryTimeout.Token);
                     }
                 }
+                // This attempt's evidence only: the property snapshot was cleared when
+                // the attempt began, and the native facts are this attempt's own.
+                evidence.Observe(LastReport!.Observed, attempt?.Observation is { } seen ? CompositionFacts(seen) : null);
                 if (LastReport!.Observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
                     StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString() + "\n" + PlaybackHealthText.Describe(health.Snapshot().State));
                 if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds)
@@ -831,13 +952,21 @@ public sealed class PlaybackService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or JsonException or InvalidOperationException)
         {
-            if (!cancellation.IsCancellationRequested)
+            // A player that is closing ends this connection as a matter of course;
+            // only a live player that stopped answering is worth a line, once.
+            // Sustained health keeps its own connection and is unaffected.
+            if (!cancellation.IsCancellationRequested && !process.WaitForExit(500))
             {
-                LastReport!.FallbackHistory.Add("Live diagnostics unavailable; playback was not interrupted.");
+                const string line = "Detailed live diagnostics stopped; playback health monitoring continues.";
+                if (!LastReport!.FallbackHistory.Contains(line)) LastReport.FallbackHistory.Add(line);
                 DiagnosticsStore.Event("warning", "ipc-unavailable", ex.ToString());
             }
         }
     }
+
+    private static NativeCompositionFacts CompositionFacts(NativeDvObservation o) => new(
+        o.Renderer == DvObservedState.Active, o.DecoderInstances, o.BlElPairing == DvObservedState.Active,
+        o.Delivered == NativeDvDelivered.FullEnhancementLayer, o.Delivered.ToString(), o.HardwareDecoderInUse);
 
     /// <summary>Read a file the player still holds open for writing.</summary>
     private static string ReadSharedText(string path)

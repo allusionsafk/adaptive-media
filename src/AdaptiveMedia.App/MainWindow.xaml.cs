@@ -25,6 +25,16 @@ public partial class MainWindow : Window
     private bool _displayChanged;
     private long _generation;
     private bool _playing, _uiReady, _closed, _closeAfterPlayback;
+    private readonly System.Windows.Threading.DispatcherTimer _truthRefresh = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    private void RefreshTruth()
+    {
+        if (_backend.Playback.CurrentTruth() is not { } truth) return;
+        TruthText.Text = truth.Format();
+        TruthExpander.Visibility = Visibility.Visible;
+    }
+
+    private void TruthExpander_Expanded(object sender, RoutedEventArgs e) => RefreshTruth();
 
     public MainWindow(string[] startupItems)
     {
@@ -33,6 +43,9 @@ public partial class MainWindow : Window
         {
             if (!_closed && _playing) RuntimeText.Text = text;
         });
+        // The detail surface refreshes at a calm pace, and only while someone is
+        // looking at it; the concise activity text stays the normal view.
+        _truthRefresh.Tick += (_, _) => { if (TruthExpander.IsExpanded) RefreshTruth(); };
         _startupItems = startupItems.Where(x => !x.StartsWith("--", StringComparison.Ordinal)).ToArray();
         Loaded += MainWindow_Loaded;
         SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
@@ -223,9 +236,13 @@ public partial class MainWindow : Window
         {
             StatusText.Text = "Playing — close the player to return";
             RuntimeText.Text = "Starting the reviewed playback plan…";
+            TruthExpander.Visibility = Visibility.Visible;
+            TruthText.Text = "Waiting for the player to report.";
+            _truthRefresh.Start();
             int exitCode = await _backend.Playback.LaunchAsync(plan);
             StatusText.Text = exitCode == 0 ? "Playback ended — ready to play again" : $"Playback ended with an error ({exitCode})";
             RuntimeText.Text = _backend.Playback.LastReport?.Summary ?? "Playback ended.";
+            RefreshTruth();
         }
         catch (Exception ex)
         {
@@ -235,6 +252,7 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _truthRefresh.Stop();
             _playing = false;
             if (_closeAfterPlayback) Close();
             if (!_closed)

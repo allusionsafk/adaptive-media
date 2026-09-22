@@ -1,0 +1,346 @@
+using System.Globalization;
+using System.Text.Json;
+
+namespace AdaptiveMedia;
+
+/// <summary>What one attempt's native composition evidence established, reduced
+/// to plain facts so the truth surface does not depend on the native lane. Built
+/// only from that attempt's own observation.</summary>
+public sealed record NativeCompositionFacts(bool RendererActive, int DecoderInstances, bool BaseAndEnhancementPaired,
+    bool FelComposed, string Delivered, string? HardwareDecoder);
+
+/// <summary>Everything one attempt established, and nothing it did not. Owned by
+/// exactly one attempt: a replacement gets a new instance, so evidence cannot
+/// travel between attempts.</summary>
+public sealed class PlaybackAttemptEvidence
+{
+    private readonly object _gate = new();
+    private Dictionary<string, JsonElement> _observed = [];
+    private NativeCompositionFacts? _native;
+    private PlaybackHealthSnapshot? _health;
+    private Func<PlaybackHealthSnapshot>? _liveHealth;
+
+    public PlaybackAttemptEvidence(long attemptId, int number, PlaybackPlan plan, PlaybackAttemptKind kind, string runtime,
+        string? nativeRuntimeVersion = null, bool nativeFelRequested = false)
+    {
+        AttemptId = attemptId; Number = number; Plan = plan; Kind = kind; Runtime = runtime;
+        NativeRuntimeVersion = nativeRuntimeVersion; NativeFelRequested = nativeFelRequested;
+    }
+
+    public long AttemptId { get; }
+    public int Number { get; }
+    public PlaybackPlan Plan { get; }
+    public PlaybackAttemptKind Kind { get; }
+    public string Runtime { get; }
+    public string? NativeRuntimeVersion { get; }
+    public bool NativeFelRequested { get; }
+    public bool Started { get; set; }
+
+    /// <summary>Replace this attempt's property snapshot. Copied, so later
+    /// mutation of the caller's dictionary cannot reach it.</summary>
+    public void Observe(IReadOnlyDictionary<string, JsonElement> properties, NativeCompositionFacts? native)
+    {
+        var copy = properties.ToDictionary(x => x.Key, x => x.Value.Clone());
+        lock (_gate) { _observed = copy; if (native is not null) _native = native; }
+    }
+
+    /// <summary>This attempt's own live health, read until the attempt finishes.</summary>
+    public void TrackHealth(Func<PlaybackHealthSnapshot> live) { lock (_gate) _liveHealth = live; }
+
+    public void Finish(PlaybackHealthSnapshot? health) { lock (_gate) { _health = health; _liveHealth = null; } }
+
+    public (IReadOnlyDictionary<string, JsonElement> Observed, NativeCompositionFacts? Native, PlaybackHealthSnapshot? Health) Read()
+    {
+        Func<PlaybackHealthSnapshot>? live;
+        lock (_gate)
+        {
+            if (_health is not null || _liveHealth is null) return (_observed, _native, _health);
+            live = _liveHealth;
+        }
+        return (_observed, _native, live());
+    }
+}
+
+public sealed record PlaybackTruthSection(string Title, IReadOnlyList<string> Lines);
+
+/// <summary>The user-facing truth chain for one playback: requested, planned,
+/// observed, health, recovery, and why. Every observed line comes from the
+/// current attempt's own evidence; earlier attempts appear only as history.</summary>
+public sealed record PlaybackTruthReport(PlaybackTruthSection Requested, PlaybackTruthSection Planned,
+    PlaybackTruthSection Observed, PlaybackTruthSection Health, PlaybackTruthSection Recovery,
+    PlaybackTruthSection Why, IReadOnlyList<PlaybackTruthSection> History, string Headline)
+{
+    public IEnumerable<PlaybackTruthSection> Sections => [Requested, Planned, Observed, Health, Recovery, Why];
+
+    /// <summary>The expandable detail text.</summary>
+    public string Format()
+    {
+        var text = new System.Text.StringBuilder();
+        foreach (var section in Sections)
+        {
+            text.AppendLine(section.Title);
+            foreach (string line in section.Lines) text.AppendLine("  " + line);
+            text.AppendLine();
+        }
+        if (History.Count > 0)
+        {
+            text.AppendLine("Earlier attempts in this playback");
+            foreach (var attempt in History)
+            {
+                text.AppendLine("  " + attempt.Title);
+                foreach (string line in attempt.Lines) text.AppendLine("    " + line);
+            }
+        }
+        return text.ToString().TrimEnd();
+    }
+}
+
+/// <summary>Builds the truth chain. Pure: it reads recorded plan facts, attempt
+/// evidence, health snapshots and recovery records, and invents nothing. A
+/// request is never shown as an observation, and something that can only be
+/// planned (driver-side RTX processing, for example) stays under Planned.</summary>
+public static class PlaybackTruthBuilder
+{
+    /// <summary>Earlier attempts retained for one playback. A playback makes at most
+    /// four (current native, previous native, stable, compatibility retry).</summary>
+    public const int MaximumHistory = 6;
+
+    public static PlaybackTruthReport Build(PlaybackAttemptEvidence current, IReadOnlyList<PlaybackAttemptEvidence> earlier,
+        IReadOnlyList<PlaybackRecoveryRecord> recovery, IReadOnlyList<string>? nativeLaneNotes = null)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+        var (observed, native, health) = current.Read();
+        var requested = Requested(current);
+        var planned = Planned(current);
+        var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started);
+        var healthLines = new List<string> { HealthText.Describe(health?.State ?? SustainedPlaybackHealth.Starting) };
+        if (health is { } h && h.WorstCondition is not (SustainedPlaybackHealth.Healthy or SustainedPlaybackHealth.Starting) &&
+            h.WorstCondition != h.State)
+            healthLines.Add("Earlier in this attempt: " + HealthText.Describe(h.WorstCondition));
+        var recoveryLines = RecoveryLines(recovery);
+        var why = Why(current, recovery, nativeLaneNotes);
+        var history = earlier.Where(x => x.AttemptId != current.AttemptId).TakeLast(MaximumHistory)
+            .Select(x => History(x, recovery)).ToArray();
+        string headline = "Playback health: " + healthLines[0];
+        var lastRecovery = recovery.LastOrDefault();
+        if (lastRecovery is not null) headline += "\nRecovery: " + RecoveryOutcome(lastRecovery);
+        return new(new("Requested", requested), new("Planned", planned), new("Observed", observedLines),
+            new("Playback health", healthLines), new("Recovery", recoveryLines), new("Why this path?", why), history, headline);
+    }
+
+    private static List<string> Requested(PlaybackAttemptEvidence attempt)
+    {
+        var o = attempt.Plan.Requested;
+        var lines = new List<string>();
+        if (attempt.NativeFelRequested) lines.Add("Native Dolby Vision · full enhancement layer (FEL)");
+        lines.Add(o.UpscaleMode switch
+        {
+            "RtxVsr" => "RTX Super Resolution",
+            "HighQuality" => "High-quality scaling",
+            "Automatic" => "Automatic scaling",
+            _ => "Standard scaling",
+        });
+        lines.Add(o.MotionMode switch { "Smooth" => "Smooth motion", "Gentle" => "Gentle motion", _ => "Native cadence" });
+        if (o.RtxHdr) lines.Add("RTX Video HDR");
+        string cleanup = o.CleanupMode == "Legacy" ? (o.Cleanup ? "Normal" : "Off") : o.CleanupMode;
+        if (cleanup != "Off") lines.Add("Banding reduction: " + cleanup);
+        lines.Add("Preset: " + o.Profile);
+        return lines;
+    }
+
+    private static string? Argument(PlaybackPlan plan, string name) =>
+        plan.Arguments.TakeWhile(x => x != "--").LastOrDefault(x => x.StartsWith(name + "=", StringComparison.Ordinal))?[(name.Length + 1)..];
+
+    private static bool HasProfile(PlaybackPlan plan, string profile) =>
+        plan.Arguments.TakeWhile(x => x != "--").Contains("--profile=" + profile);
+
+    private static List<string> Planned(PlaybackAttemptEvidence attempt)
+    {
+        var plan = attempt.Plan;
+        var lines = new List<string>();
+        if (attempt.Kind != PlaybackAttemptKind.Stable)
+        {
+            lines.Add("Native Dolby Vision Profile 7 · verified runtime" + (attempt.NativeRuntimeVersion is { } v ? " " + v : "") +
+                (attempt.Kind == PlaybackAttemptKind.NativePrevious ? " (previous)" : ""));
+            if (attempt.NativeFelRequested) lines.Add("Full enhancement-layer composition requested of the runtime");
+        }
+        string? hwdec = Argument(plan, "--hwdec");
+        lines.Add(hwdec switch
+        {
+            "d3d11va" => "D3D11VA hardware decoding",
+            null when HasProfile(plan, "nvidia") => "NVDEC hardware decoding (automatic fallback)",
+            null when HasProfile(plan, "compatibility") => "D3D11VA copy-back decoding (automatic fallback)",
+            null => "Automatic hardware decoding",
+            _ => "Decoding: " + hwdec,
+        });
+        string? vf = Argument(plan, "--vf");
+        if (vf is not null && vf.Contains("d3d11vpp", StringComparison.Ordinal))
+        {
+            lines.Add("NVIDIA D3D11 VPP");
+            if (plan.RtxSrConstructed) lines.Add($"RTX Super Resolution at {plan.Scale.ToString("0.###", CultureInfo.InvariantCulture)}×");
+            if (plan.RtxHdrConstructed) lines.Add("RTX Video HDR");
+        }
+        string? vo = Argument(plan, "--vo");
+        string? api = Argument(plan, "--gpu-api");
+        lines.Add((vo ?? "default renderer") + (api == "d3d11" ? " · Direct3D 11" : HasProfile(plan, "compatibility") ? " · Direct3D 11" : " · Vulkan"));
+        if (Argument(plan, "--scale") is { } scale) lines.Add("libplacebo scaling (" + scale + ")");
+        if (Argument(plan, "--video-sync") == "display-resample")
+            lines.Add((Argument(plan, "--tscale") == "oversample" ? "Gentle" : "Smooth") + " motion (display-resample)");
+        if (Argument(plan, "--deband") == "yes") lines.Add("Banding reduction (deband)");
+        if (Argument(plan, "--start") is { } start && double.TryParse(start, NumberStyles.Float, CultureInfo.InvariantCulture, out double at))
+            lines.Add("Start near " + PlaybackRecoveryText.Position(at));
+        return lines;
+    }
+
+    private static (int W, int H)? Size(IReadOnlyDictionary<string, JsonElement> observed, string name)
+    {
+        if (!observed.TryGetValue(name, out var v) || v.ValueKind != JsonValueKind.Object) return null;
+        if (!v.TryGetProperty("w", out var w) || !v.TryGetProperty("h", out var h) || !w.TryGetInt32(out int wi) || !h.TryGetInt32(out int hi)) return null;
+        return wi > 0 && hi > 0 ? (wi, hi) : null;
+    }
+
+    /// <summary>A string property, or the first entry's name of a list-valued one
+    /// (mpv 0.41 reports gpu-api and gpu-context as object lists).</summary>
+    private static string? Text(IReadOnlyDictionary<string, JsonElement> observed, string name)
+    {
+        if (!observed.TryGetValue(name, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.String) return v.GetString();
+        if (v.ValueKind == JsonValueKind.Array && v.GetArrayLength() > 0 && v[0].ValueKind == JsonValueKind.Object &&
+            v[0].TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String) return n.GetString();
+        return null;
+    }
+
+    /// <summary>Only what this attempt's player reported. Anything not reported is
+    /// left out rather than filled in from the plan.</summary>
+    public static List<string> Observed(PlaybackPlan plan, IReadOnlyDictionary<string, JsonElement> observed,
+        NativeCompositionFacts? native, bool nativeAttempt, bool started)
+    {
+        var lines = new List<string>();
+        if (!started) { lines.Add("Nothing observed: the player did not start."); return lines; }
+        if (nativeAttempt)
+        {
+            if (native is null || !native.RendererActive) lines.Add("Composition not yet observed");
+            else if (native.FelComposed)
+            {
+                if (native.BaseAndEnhancementPaired) lines.Add($"BL + EL decoded ({native.DecoderInstances} decoder instances)");
+                lines.Add("FEL composition observed");
+            }
+            else lines.Add(native.Delivered == "BaseLayerOnly" ? "Base layer only; the enhancement layer was not composed" : "Composition unknown");
+        }
+        switch (Text(observed, "hwdec-current"))
+        {
+            case null: break;
+            case "no" or "": lines.Add("Software decoding"); break;
+            case "d3d11va": lines.Add("D3D11VA active"); break;
+            case "nvdec": lines.Add("NVDEC active"); break;
+            case var other: lines.Add(other + " decoding active"); break;
+        }
+        // A configured VPP filter is not proof that the driver processed a frame;
+        // only a scaled output reported by the player is shown as scaling.
+        if (observed.TryGetValue("vf", out var vf) && vf.ValueKind == JsonValueKind.Array &&
+            vf.EnumerateArray().Any(f => f.TryGetProperty("name", out var n) && n.GetString() == "d3d11vpp" &&
+                                         (!f.TryGetProperty("enabled", out var e) || e.ValueKind != JsonValueKind.False)))
+        {
+            var input = Size(observed, "video-params");
+            var output = Size(observed, "video-out-params");
+            lines.Add(input is { } i && output is { } o && (o.W > i.W || o.H > i.H)
+                ? $"NVIDIA VPP active · {i.W}×{i.H} → {o.W}×{o.H}"
+                : "NVIDIA VPP filter present; no scaling observed");
+        }
+        if (Text(observed, "user-data/adaptive/state") is { } state && state.Contains("could not be applied", StringComparison.Ordinal))
+            lines.Add("RTX filter could not be applied; standard scaling");
+        string? api = Text(observed, "gpu-api");
+        string? vo = Text(observed, "current-vo");
+        if (vo is not null || api is not null)
+            lines.Add((vo ?? "renderer") + (api is null ? "" : " · " + (api == "d3d11" ? "Direct3D 11" : api == "vulkan" ? "Vulkan" : api)) + " active");
+        if (Size(observed, "osd-dimensions") is { } osd) lines.Add($"{osd.W}×{osd.H} output");
+        if (observed.TryGetValue("video-target-params", out var target) && target.ValueKind == JsonValueKind.Object &&
+            target.TryGetProperty("gamma", out var gamma) && gamma.ValueKind == JsonValueKind.String)
+            lines.Add(gamma.GetString() is "pq" or "hlg" ? "HDR output (" + gamma.GetString()!.ToUpperInvariant() + ")" : "SDR output");
+        string? sync = Text(observed, "video-sync");
+        if (sync == "display-resample")
+        {
+            bool interpolating = observed.TryGetValue("interpolation", out var interp) && interp.ValueKind == JsonValueKind.True;
+            lines.Add(interpolating ? "Smooth motion active (display-resample)" : "Display-resample active without interpolation");
+        }
+        else if (sync is not null && Argument(plan, "--video-sync") == "display-resample")
+            lines.Add("Smooth motion not active (timing fallback to " + sync + ")");
+        if (observed.TryGetValue("estimated-display-fps", out var fps) && fps.ValueKind == JsonValueKind.Number && fps.GetDouble() > 0)
+            lines.Add($"Display ~{fps.GetDouble():0} Hz");
+        if (lines.Count == 0) lines.Add("Nothing observed yet");
+        return lines;
+    }
+
+    private static string AttemptName(PlaybackAttemptKind kind) => kind switch
+    {
+        PlaybackAttemptKind.NativeCurrent => "Native runtime",
+        PlaybackAttemptKind.NativePrevious => "Previous verified native runtime",
+        _ => "Stable playback",
+    };
+
+    /// <summary>What recovery actually did: the path that launched, never the one
+    /// merely selected.</summary>
+    public static string RecoveryOutcome(PlaybackRecoveryRecord record)
+    {
+        if (record.Step == nameof(PlaybackRecoveryStep.NoRecoveryAvailable)) return "Unavailable for this player";
+        if (record.LaunchedKind is not { } kind) return "Failed: no replacement player started";
+        string where = record.LaunchedResumeAt is double at ? " · resumed near " + PlaybackRecoveryText.Position(at) : " · restarted from beginning";
+        return (kind == PlaybackAttemptKind.NativePrevious ? "Previous verified native runtime" : "Stable playback") + where;
+    }
+
+    private static List<string> RecoveryLines(IReadOnlyList<PlaybackRecoveryRecord> recovery)
+    {
+        if (recovery.Count == 0) return ["None"];
+        return recovery.Select(r => $"{AttemptName(r.FailedKind)} {HealthText.FailureVerb(r.Trigger)} → {RecoveryOutcome(r)}").ToList();
+    }
+
+    private static List<string> Why(PlaybackAttemptEvidence current, IReadOnlyList<PlaybackRecoveryRecord> recovery, IReadOnlyList<string>? nativeNotes)
+    {
+        var lines = new List<string>();
+        var plan = current.Plan;
+        var last = recovery.LastOrDefault(r => r.LaunchedAttempt == current.AttemptId);
+        if (last is not null)
+        {
+            string target = last.LaunchedKind == PlaybackAttemptKind.NativePrevious ? "Previous verified runtime" : "Stable playback";
+            lines.Add($"{target} selected after the {AttemptName(last.FailedKind).ToLowerInvariant()} {HealthText.FailureVerb(last.Trigger)}.");
+            lines.Add(last.Explanation);
+        }
+        if (plan.RtxSrConstructed && plan.Source.Known)
+            lines.Add($"RTX Super Resolution selected because a {plan.Source.Height}p source is presented at " +
+                $"{Math.Round(plan.Source.Height * plan.Scale):0}p ({plan.Scale.ToString("0.###", CultureInfo.InvariantCulture)}×) on compatible NVIDIA hardware.");
+        foreach (string reason in plan.Reasons.Where(r => !r.StartsWith("Resumed at", StringComparison.Ordinal)))
+            if (!lines.Contains(reason)) lines.Add(reason);
+        if (nativeNotes is not null)
+            foreach (string note in nativeNotes) if (!lines.Contains(note)) lines.Add(note);
+        if (lines.Count == 0) lines.Add("The requested choices were planned as shown; nothing was changed.");
+        return lines;
+    }
+
+    private static PlaybackTruthSection History(PlaybackAttemptEvidence attempt, IReadOnlyList<PlaybackRecoveryRecord> recovery)
+    {
+        var (observed, native, health) = attempt.Read();
+        var lines = new List<string>();
+        if (attempt.Kind != PlaybackAttemptKind.Stable)
+            lines.Add(native is null || !native.RendererActive ? "Composition not observed"
+                : native.FelComposed ? "Full FEL observed" : native.Delivered == "BaseLayerOnly" ? "Base layer only" : "Composition unknown");
+        lines.Add(health is null ? "Health not established" : HealthText.Describe(health.WorstCondition is SustainedPlaybackHealth.Stalled or SustainedPlaybackHealth.Frozen
+            ? health.WorstCondition : health.State));
+        if (recovery.FirstOrDefault(r => r.FailedAttempt == attempt.AttemptId) is { } r) lines.Add("Recovery → " + RecoveryOutcome(r));
+        return new($"Attempt {attempt.Number} · {AttemptName(attempt.Kind)}", lines);
+    }
+}
+
+/// <summary>Calm product wording for health, without the "Playback health:" prefix.</summary>
+public static class HealthText
+{
+    public static string Describe(SustainedPlaybackHealth state) =>
+        PlaybackHealthText.Describe(state)["Playback health: ".Length..];
+
+    public static string FailureVerb(string trigger) => trigger switch
+    {
+        nameof(SustainedPlaybackHealth.Frozen) => "stopped responding",
+        nameof(SustainedPlaybackHealth.Stalled) => "stopped making progress",
+        nameof(SustainedPlaybackHealth.RuntimeFailure) => "failed",
+        _ => "failed",
+    };
+}
