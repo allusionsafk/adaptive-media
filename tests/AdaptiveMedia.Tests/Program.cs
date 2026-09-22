@@ -120,7 +120,8 @@ else if (args.Length > 0)
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(probe));
 }
 int healthAssertions = PlaybackHealthTests.Run(Check);
-Console.WriteLine($"PASS: {assertions} assertions ({healthAssertions} sustained playback health)");
+int recoveryAssertions = PlaybackRecoveryTests.Run(Check);
+Console.WriteLine($"PASS: {assertions} assertions ({healthAssertions} sustained playback health, {recoveryAssertions} automatic recovery)");
 return 0;
 }
 catch (Exception ex)
