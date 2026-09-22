@@ -235,12 +235,15 @@ public sealed class PlaybackService
                 }
 
                 DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision runtime selected.");
+                var nativeDecision = enhancementDecision?.SuppressForCorrectnessPath(
+                    "The native Dolby Vision correctness path was selected; discretionary detail, motion, and cleanup processing were not added to its separate renderer plan.");
+                var nativeOptions = nativeDecision?.ApplyTo(options) ?? effectiveOptions;
                 var nativePlan = new PlaybackPlan(outcome.Plan.Executable!, outcome.Plan.Arguments,
-                    effectiveOptions with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
+                    nativeOptions with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
                     "Native Dolby Vision gpu-next", false, false, 1,
-                    [.. enhancementDecision?.Reasons ?? [], outcome.Plan.Explanation,
+                    [.. nativeDecision?.Reasons ?? [], outcome.Plan.Explanation,
                      "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts."],
-                    nativePipe, options.Intent, enhancementDecision);
+                    nativePipe, options.Intent, nativeDecision);
                 if (_preparedReports.Count >= 32) _preparedReports.Clear();
                 if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
                 _nativeSelections[nativePipe] = new(outcome,

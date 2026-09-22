@@ -23,6 +23,11 @@ internal static class EnhancementPlannerTests
         Check(noUpscale.Detail == DetailImplementation.None &&
               noUpscale.Reasons.Any(x => x.Contains("already meets", StringComparison.OrdinalIgnoreCase)),
             "DETAIL: matching output blocks RTX despite compatible hardware");
+        var aspectCorrected = EnhancementPlanner.Decide(Enhanced(),
+            Environment(source: new MediaInfo(720, 480, 24, Aspect: 16.0 / 9)));
+        Check(aspectCorrected.Detail == DetailImplementation.Conventional &&
+              aspectCorrected.Reasons.Any(x => x.Contains("aspect correction", StringComparison.OrdinalIgnoreCase)),
+            "DETAIL: aspect-corrected sources use conventional scaling with a truthful reason");
 
         var eligible = EnhancementPlanner.Decide(Enhanced(), Environment());
         Check(eligible.Detail == DetailImplementation.NvidiaVpp &&
@@ -87,6 +92,10 @@ internal static class EnhancementPlannerTests
         var clean = EnhancementPlanner.Decide(Enhanced(cleanup: CleanupIntent.Clean), Environment());
         Check(clean.Cleanup == CleanupImplementation.Strong,
             "CLEANUP: Clean selects the stronger currently-supported cleanup");
+        var conservativeAutomatic = EnhancementPlanner.Decide(EnhancementIntent.ForAutomatic(), Environment(source: new()));
+        Check(conservativeAutomatic.Cleanup == CleanupImplementation.Off &&
+              conservativeAutomatic.Reasons.Any(x => x.Contains("do not justify", StringComparison.OrdinalIgnoreCase)),
+            "CLEANUP: Automatic balanced intent stays off when source facts are unknown");
 
         var automatic = EnhancementPreferences.IntentFor("Automatic", "BalancedImprovement", "Normal",
             "Balanced", "Original", "Balanced", "Balanced");
@@ -121,6 +130,14 @@ internal static class EnhancementPlannerTests
         var second = EnhancementPlanner.Decide(Enhanced(), Environment());
         Check(first == second && first.Reasons.SequenceEqual(second.Reasons),
             "DETERMINISM: identical immutable inputs produce identical decisions and reasons");
+        var mismatchedTemplate = first.ApplyTo(new PlaybackOptions("Reference", "Off", "Off", false, false));
+        Check(mismatchedTemplate.Profile == "Enhanced",
+            "BOUNDARY: semantic intent owns the product mode even when a legacy template disagrees");
+        var correctnessPath = first.SuppressForCorrectnessPath("Native correctness path selected.");
+        Check(correctnessPath.Detail == DetailImplementation.None && correctnessPath.Motion == MotionImplementation.Original &&
+              correctnessPath.Cleanup == CleanupImplementation.Off &&
+              correctnessPath.Reasons.SequenceEqual(["Native correctness path selected."]),
+            "BOUNDARY: a correctness-only path cannot claim discretionary implementations absent from its argv");
 
         PlaybackPlan SemanticPlan(EnhancementIntent intent, PlaybackCapabilities? capabilities = null,
             PlaybackTarget? target = null) => PlaybackPlanBuilder.Build("mpv.exe", "config", ["movie.mp4"],

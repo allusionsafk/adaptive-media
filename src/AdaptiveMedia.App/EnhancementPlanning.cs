@@ -59,12 +59,20 @@ public sealed class EnhancementDecision : IEquatable<EnhancementDecision>
 
     public PlaybackOptions ApplyTo(PlaybackOptions template) => template with
     {
+        Profile = Intent.Mode.ToString(),
         UpscaleMode = Detail switch { DetailImplementation.NvidiaVpp => "RtxVsr", DetailImplementation.Conventional => "HighQuality", _ => "Off" },
         MotionMode = Motion switch { MotionImplementation.CadenceCorrected => "Cadence", MotionImplementation.BlendSmooth => "Smooth", _ => "Off" },
         Cleanup = Cleanup != CleanupImplementation.Off,
         CleanupMode = Cleanup switch { CleanupImplementation.Gentle => "Gentle", CleanupImplementation.Balanced => "Normal", CleanupImplementation.Strong => "Strong", _ => "Off" },
         Intent = Intent,
     };
+
+    public EnhancementDecision SuppressForCorrectnessPath(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) throw new ArgumentException("A truthful correctness-path reason is required.", nameof(reason));
+        return new(Intent, DetailImplementation.None, MotionImplementation.Original, CleanupImplementation.Off,
+            Cadence, Scale, [reason]);
+    }
 
     public bool Equals(EnhancementDecision? other) => other is not null && Intent == other.Intent &&
         Detail == other.Detail && Motion == other.Motion && Cleanup == other.Cleanup && Cadence == other.Cadence &&
@@ -167,7 +175,7 @@ public static class EnhancementPlanner
                     intent.Strength == EnhancementStrength.Normal ? DetailIntent.Sharper : DetailIntent.Maximum,
                 intent.Strength == EnhancementStrength.Subtle ? MotionIntent.CadenceCorrected :
                     intent.Strength == EnhancementStrength.Normal ? MotionIntent.BlendSmooth : MotionIntent.GeneratedMotion,
-                intent.Strength == EnhancementStrength.Strong ? CleanupIntent.Clean : CleanupIntent.Balanced),
+                intent.Strength == EnhancementStrength.Strong ? CleanupIntent.Clean : CleanupIntent.Automatic),
         };
     }
 
@@ -185,6 +193,13 @@ public static class EnhancementPlanner
         {
             reasons.Add("Conventional source presentation selected because source or output dimensions are unknown.");
             return DetailImplementation.None;
+        }
+        bool aspectCorrection = environment.Source.Aspect > 0 &&
+            Math.Abs(environment.Source.Aspect - (double)environment.Source.Width / environment.Source.Height) > 0.015;
+        if (aspectCorrection)
+        {
+            reasons.Add("High-quality conventional scaling selected because aspect correction should remain on the gpu-next/libplacebo path.");
+            return DetailImplementation.Conventional;
         }
         if (scale <= 1.001)
         {

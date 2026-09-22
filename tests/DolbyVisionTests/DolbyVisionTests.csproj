@@ -11,6 +11,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/MpvIpc.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />
     <!-- The real orchestration, so the rollback path can be exercised end to end
          rather than re-implemented in the test. None of these touch WPF. -->
