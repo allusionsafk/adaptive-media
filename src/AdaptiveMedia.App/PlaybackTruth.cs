@@ -66,11 +66,11 @@ public sealed record PlaybackTruthSection(string Title, IReadOnlyList<string> Li
 /// <summary>The user-facing truth chain for one playback: requested, planned,
 /// observed, health, recovery, and why. Every observed line comes from the
 /// current attempt's own evidence; earlier attempts appear only as history.</summary>
-public sealed record PlaybackTruthReport(PlaybackTruthSection Requested, PlaybackTruthSection Planned,
+public sealed record PlaybackTruthReport(PlaybackTruthSection Intent, PlaybackTruthSection Requested, PlaybackTruthSection Planned,
     PlaybackTruthSection Observed, PlaybackTruthSection Health, PlaybackTruthSection Recovery,
     PlaybackTruthSection Why, IReadOnlyList<PlaybackTruthSection> History, string Headline)
 {
-    public IEnumerable<PlaybackTruthSection> Sections => [Requested, Planned, Observed, Health, Recovery, Why];
+    public IEnumerable<PlaybackTruthSection> Sections => [Intent, Requested, Planned, Observed, Health, Recovery, Why];
 
     /// <summary>The expandable detail text.</summary>
     public string Format()
@@ -110,6 +110,7 @@ public static class PlaybackTruthBuilder
     {
         ArgumentNullException.ThrowIfNull(current);
         var (observed, native, health) = current.Read();
+        var intent = IntentLines(current.Plan);
         var requested = Requested(current);
         var planned = Planned(current);
         var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started);
@@ -124,25 +125,74 @@ public static class PlaybackTruthBuilder
         string headline = "Playback health: " + healthLines[0];
         var lastRecovery = recovery.LastOrDefault();
         if (lastRecovery is not null) headline += "\nRecovery: " + RecoveryOutcome(lastRecovery);
-        return new(new("Requested", requested), new("Planned", planned), new("Observed", observedLines),
+        return new(new("Intent", intent), new("Requested", requested), new("Planned", planned), new("Observed", observedLines),
             new("Playback health", healthLines), new("Recovery", recoveryLines), new("Why this path?", why), history, headline);
     }
+
+    private static List<string> IntentLines(PlaybackPlan plan)
+    {
+        if (plan.Intent is not { } intent) return ["Legacy playback choices"];
+        return intent.Mode switch
+        {
+            EnhancementMode.Reference => ["Preserve the original look", "Source-faithful processing"],
+            EnhancementMode.Compatibility => ["Compatibility playback"],
+            EnhancementMode.Automatic => [intent.Goal switch
+            {
+                AutomaticGoal.PreserveOriginal => "Preserve the original look",
+                AutomaticGoal.ImproveDetail => "Improve detail",
+                AutomaticGoal.SmootherMotion => "Make motion smoother",
+                AutomaticGoal.CleanImage => "Clean up compression and banding",
+                _ => "Balanced improvement",
+            }, "Strength: " + intent.Strength, "Performance: " + SplitWords(intent.Performance.ToString())],
+            _ => [intent.Detail switch
+            {
+                DetailIntent.Maximum => "Maximum detail",
+                DetailIntent.Sharper => "Sharper detail",
+                DetailIntent.Balanced => "Balanced detail",
+                _ => "Preserve source detail",
+            }, "Motion: " + SplitWords(intent.Motion.ToString()), "Cleanup: " + SplitWords(intent.Cleanup.ToString()),
+                "Performance: " + SplitWords(intent.Performance.ToString())],
+        };
+    }
+
+    private static string SplitWords(string value) => System.Text.RegularExpressions.Regex.Replace(value, "([a-z])([A-Z])", "$1 $2");
 
     private static List<string> Requested(PlaybackAttemptEvidence attempt)
     {
         var o = attempt.Plan.Requested;
         var lines = new List<string>();
         if (attempt.NativeFelRequested) lines.Add("Native Dolby Vision · full enhancement layer (FEL)");
-        lines.Add(o.UpscaleMode switch
+        lines.Add(attempt.Plan.Decision?.Detail switch
         {
-            "RtxVsr" => "RTX Super Resolution",
-            "HighQuality" => "High-quality scaling",
-            "Automatic" => "Automatic scaling",
-            _ => "Standard scaling",
+            DetailImplementation.NvidiaVpp => "RTX Super Resolution",
+            DetailImplementation.Conventional => "High-quality conventional scaling",
+            DetailImplementation.None => "No discretionary upscaling",
+            _ => o.UpscaleMode switch
+            {
+                "RtxVsr" => "RTX Super Resolution",
+                "HighQuality" => "High-quality scaling",
+                "Automatic" => "Automatic scaling",
+                _ => "Standard scaling",
+            },
         });
-        lines.Add(o.MotionMode switch { "Smooth" => "Smooth motion", "Gentle" => "Gentle motion", _ => "Native cadence" });
+        lines.Add(attempt.Plan.Decision?.Motion switch
+        {
+            MotionImplementation.CadenceCorrected => "Cadence-corrected presentation",
+            MotionImplementation.BlendSmooth => "Temporal blend smoothing",
+            MotionImplementation.GeneratedMotion => "Generated motion",
+            MotionImplementation.NeuralMotion => "Neural motion",
+            MotionImplementation.Original => "Original motion",
+            _ => o.MotionMode switch { "Smooth" => "Smooth motion", "Gentle" => "Gentle motion", _ => "Native cadence" },
+        });
         if (o.RtxHdr) lines.Add("RTX Video HDR");
-        string cleanup = o.CleanupMode == "Legacy" ? (o.Cleanup ? "Normal" : "Off") : o.CleanupMode;
+        string cleanup = attempt.Plan.Decision?.Cleanup switch
+        {
+            CleanupImplementation.Gentle => "Gentle",
+            CleanupImplementation.Balanced => "Balanced",
+            CleanupImplementation.Strong => "Clean",
+            CleanupImplementation.Off => "Off",
+            _ => o.CleanupMode == "Legacy" ? (o.Cleanup ? "Normal" : "Off") : o.CleanupMode,
+        };
         if (cleanup != "Off") lines.Add("Banding reduction: " + cleanup);
         lines.Add("Preset: " + o.Profile);
         return lines;
@@ -185,7 +235,11 @@ public static class PlaybackTruthBuilder
         lines.Add((vo ?? "default renderer") + (api == "d3d11" ? " · Direct3D 11" : HasProfile(plan, "compatibility") ? " · Direct3D 11" : " · Vulkan"));
         if (Argument(plan, "--scale") is { } scale) lines.Add("libplacebo scaling (" + scale + ")");
         if (Argument(plan, "--video-sync") == "display-resample")
-            lines.Add((Argument(plan, "--tscale") == "oversample" ? "Gentle" : "Smooth") + " motion (display-resample)");
+            lines.Add(Argument(plan, "--interpolation") != "yes"
+                ? "Cadence-corrected presentation (display-resample, no interpolation)"
+                : plan.Decision?.Motion == MotionImplementation.BlendSmooth
+                    ? "Temporal blend smoothing (display-resample)"
+                    : (Argument(plan, "--tscale") == "oversample" ? "Gentle" : "Smooth") + " motion (display-resample)");
         if (Argument(plan, "--deband") == "yes") lines.Add("Banding reduction (deband)");
         if (Argument(plan, "--start") is { } start && double.TryParse(start, NumberStyles.Float, CultureInfo.InvariantCulture, out double at))
             lines.Add("Start near " + PlaybackRecoveryText.Position(at));

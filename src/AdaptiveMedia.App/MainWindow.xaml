@@ -37,85 +37,102 @@
 
                 <Border Background="{StaticResource CardBrush}" BorderBrush="#D7DCE3" BorderThickness="1" CornerRadius="8" Padding="20">
                     <StackPanel x:Name="PlaybackChoices">
-                        <TextBlock Text="Playback choices" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,14"/>
+                        <TextBlock Text="How should this look?" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBlock Text="Choose the result you want. DemiMedia will select and explain the playback path."
+                                   TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,14"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="28"/>
-                                <ColumnDefinition Width="100"/>
-                                <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="Preset" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                            <ComboBox AutomationProperties.Name="Playback preset" x:Name="ProfileBox" Grid.Column="1" SelectedIndex="0">
-                                <ComboBoxItem Content="Automatic" ToolTip="Sensible defaults for the current PC and source."/>
+                            <TextBlock Grid.Column="0" Text="Mode" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox AutomationProperties.Name="Enhancement mode" x:Name="ProfileBox" Grid.Column="1" SelectedIndex="0">
+                                <ComboBoxItem Content="Automatic" ToolTip="Describe the result you want and let DemiMedia choose the supported path."/>
                                 <ComboBoxItem Content="Reference" ToolTip="Preserve source cadence and colour intent; avoid optional processing."/>
-                                <ComboBoxItem Content="Enhanced" ToolTip="Use the selected opt-in processing features for this launch."/>
+                                <ComboBoxItem Content="Enhanced" ToolTip="Choose detail, motion, cleanup, and performance independently."/>
                                 <ComboBoxItem Content="Compatibility" ToolTip="Use the fallback playback path for troublesome files or drivers."/>
                             </ComboBox>
-                            <TextBlock Grid.Column="3" Text="Upscaling" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                            <ComboBox AutomationProperties.Name="Upscaling" x:Name="UpscaleBox" Grid.Column="4" SelectedIndex="0">
-                                <ComboBoxItem Content="Off" Tag="Off" ToolTip="No extra upscaling processing."/>
-                                <ComboBoxItem Content="Automatic" Tag="Automatic" ToolTip="Dependable conventional scaling across GPUs."/>
-                                <ComboBoxItem Content="High quality" Tag="HighQuality" ToolTip="EWA Lanczos Sharp scaling for lower-resolution video."/>
-                                <ComboBoxItem Content="RTX Super Resolution" Tag="RtxVsr" ToolTip="Optional NVIDIA driver-assisted video upscaling."/>
+                        </Grid>
+
+                        <Grid x:Name="AutomaticChoices" Margin="0,16,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="100"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="28"/>
+                                <ColumnDefinition Width="100"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Priority" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox x:Name="AutomaticGoalBox" Grid.Column="1" AutomationProperties.Name="What matters most">
+                                <ComboBoxItem Content="Preserve the original look" Tag="PreserveOriginal"/>
+                                <ComboBoxItem Content="Improve detail" Tag="ImproveDetail"/>
+                                <ComboBoxItem Content="Make motion smoother" Tag="SmootherMotion"/>
+                                <ComboBoxItem Content="Clean up compression and banding" Tag="CleanImage"/>
+                                <ComboBoxItem Content="Balanced improvement" Tag="BalancedImprovement"/>
+                            </ComboBox>
+                            <TextBlock Grid.Column="3" Text="Strength" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox x:Name="AutomaticStrengthBox" Grid.Column="4" AutomationProperties.Name="Automatic enhancement strength">
+                                <ComboBoxItem Content="Subtle" Tag="Subtle"/>
+                                <ComboBoxItem Content="Normal" Tag="Normal"/>
+                                <ComboBoxItem Content="Strong" Tag="Strong"/>
                             </ComboBox>
                         </Grid>
 
-                        <Grid Margin="0,6,0,0">
+                        <Grid x:Name="AutomaticPerformanceRow" Margin="0,12,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="28"/>
-                                <ColumnDefinition Width="100"/>
-                                <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="1" Text="Automatic - sensible defaults | Reference - source-faithful | Enhanced - tuned processing | Compatibility - fallback path"
-                                       TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                            <TextBlock Grid.Column="4" Text="RTX Super Resolution needs compatible NVIDIA hardware. The plan explains any fallback."
-                                       TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                        </Grid>
-
-                        <Grid Margin="0,14,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="100"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="28"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="Motion" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                            <ComboBox AutomationProperties.Name="Motion" x:Name="MotionBox" Grid.Column="1" SelectedIndex="0" VerticalAlignment="Top">
-                                <ComboBoxItem Content="Native cadence" Tag="Off" ToolTip="Keep the source frame cadence. No interpolation."/>
-                                <ComboBoxItem Content="Gentle smooth motion" Tag="Gentle" ToolTip="Light temporal interpolation to reduce judder. This is mpv cadence smoothing, not AI optical-flow frame generation."/>
-                                <ComboBoxItem Content="Smooth motion" Tag="Smooth" ToolTip="Stronger temporal interpolation for smoother cadence; may create a soap-opera look. This is not AI optical-flow frame generation."/>
+                            <TextBlock Grid.Column="0" Text="Performance" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox x:Name="AutomaticPerformanceBox" Grid.Column="1" AutomationProperties.Name="Automatic performance preference">
+                                <ComboBoxItem Content="Efficient" Tag="Efficient"/>
+                                <ComboBoxItem Content="Balanced" Tag="Balanced"/>
+                                <ComboBoxItem Content="Maximum quality" Tag="MaximumQuality"/>
                             </ComboBox>
-                            <StackPanel Grid.Column="3" VerticalAlignment="Center">
-                                <TextBlock Text="Reduce colour banding" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                                <ComboBox x:Name="CleanupBox" AutomationProperties.Name="Colour banding reduction" SelectedIndex="0" ToolTip="Reduce colour banding. Stronger settings may soften fine texture; this does not restore lost detail.">
-                                    <ComboBoxItem Content="Off" Tag="Off"/>
-                                    <ComboBoxItem Content="Gentle" Tag="Gentle"/>
-                                    <ComboBoxItem Content="Normal" Tag="Normal"/>
-                                    <ComboBoxItem Content="Strong" Tag="Strong"/>
-                                    <ComboBoxItem Content="Automatic" Tag="Automatic"/>
-                                </ComboBox>
-                                <CheckBox x:Name="RtxHdrCheck" Content="RTX Video HDR" Margin="0,10,0,0" ToolTip="Experimental NVIDIA HDR enhancement. Never enabled automatically."/>
-                            </StackPanel>
                         </Grid>
 
-                        <Grid Margin="0,6,0,0">
+                        <Grid x:Name="EnhancedChoices" Margin="0,16,0,0" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="28"/>
+                                <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="1" Text="Smoothing blends frames to reduce judder. It is not AI frame generation."
-                                       TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                            <TextBlock Grid.Column="3" Text="Stronger banding reduction may soften texture. RTX HDR is experimental; support is checked in the plan."
-                                       TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                            <TextBlock Text="Detail" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox x:Name="EnhancedDetailBox" Grid.Column="1" AutomationProperties.Name="Enhanced detail preference">
+                                <ComboBoxItem Content="Preserve" Tag="Preserve"/>
+                                <ComboBoxItem Content="Balanced" Tag="Balanced"/>
+                                <ComboBoxItem Content="Sharper" Tag="Sharper"/>
+                                <ComboBoxItem Content="Maximum" Tag="Maximum"/>
+                                <ComboBoxItem Content="Automatic" Tag="Automatic"/>
+                            </ComboBox>
+                            <TextBlock Grid.Column="3" Text="Motion" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            <ComboBox x:Name="EnhancedMotionBox" Grid.Column="4" AutomationProperties.Name="Enhanced motion preference">
+                                <ComboBoxItem Content="Original" Tag="Original" ToolTip="Preserve the source's temporal samples."/>
+                                <ComboBoxItem Content="Correct cadence" Tag="CadenceCorrected" ToolTip="Correct display cadence without blending neighbouring frames."/>
+                                <ComboBoxItem Content="Smoother motion" Tag="BlendSmooth" ToolTip="Blend neighbouring frames for smoother motion. This is not generated or AI motion."/>
+                            </ComboBox>
+                            <TextBlock Grid.Row="1" Text="Cleanup" VerticalAlignment="Center" FontWeight="SemiBold" Margin="0,12,0,0"/>
+                            <ComboBox x:Name="EnhancedCleanupBox" Grid.Row="1" Grid.Column="1" Margin="0,12,0,0" AutomationProperties.Name="Enhanced cleanup preference">
+                                <ComboBoxItem Content="Preserve texture" Tag="PreserveTexture"/>
+                                <ComboBoxItem Content="Balanced" Tag="Balanced"/>
+                                <ComboBoxItem Content="Clean" Tag="Clean"/>
+                                <ComboBoxItem Content="Automatic" Tag="Automatic"/>
+                            </ComboBox>
+                            <TextBlock Grid.Row="1" Grid.Column="3" Text="Performance" VerticalAlignment="Center" FontWeight="SemiBold" Margin="0,12,0,0"/>
+                            <ComboBox x:Name="EnhancedPerformanceBox" Grid.Row="1" Grid.Column="4" Margin="0,12,0,0" AutomationProperties.Name="Enhanced performance preference">
+                                <ComboBoxItem Content="Efficient" Tag="Efficient"/>
+                                <ComboBoxItem Content="Balanced" Tag="Balanced"/>
+                                <ComboBoxItem Content="Maximum quality" Tag="MaximumQuality"/>
+                            </ComboBox>
                         </Grid>
-                        <TextBlock Text="Reference preserves source cadence and colour. Your plan explains which selected enhancements can be used."
-                                   TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
+
+                        <TextBlock x:Name="ModeExplanation" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
                         <CheckBox x:Name="RememberCheck" Content="Remember these playback choices as my defaults" Margin="0,14,0,0"/>
                     </StackPanel>
                 </Border>
@@ -130,7 +147,7 @@
                         <TextBlock Text="Playback activity" FontWeight="SemiBold"/>
                         <TextBlock x:Name="RuntimeText" Text="Playback has not started. Driver activity is checked during playback where observable." TextWrapping="Wrap" Margin="0,6,0,16" AutomationProperties.LiveSetting="Polite"/>
                         <Expander x:Name="TruthExpander" Header="Playback details" Visibility="Collapsed" Margin="0,0,0,12" Expanded="TruthExpander_Expanded">
-                        <TextBlock x:Name="TruthText" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" AutomationProperties.Name="Requested, planned, observed, health and recovery for this playback"/></Expander>
+                        <TextBlock x:Name="TruthText" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" AutomationProperties.Name="Intent, requested, planned, observed, health and recovery for this playback"/></Expander>
                         <Expander Header="System details">
                         <TextBlock x:Name="SystemText" Text="Detecting hardware and display state…" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0"/></Expander>
                     </StackPanel>

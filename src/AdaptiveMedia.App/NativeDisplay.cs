@@ -16,6 +16,7 @@ namespace AdaptiveMedia.Native
         public bool Supported;
         public bool Enabled;
         public bool ForceDisabled;
+        public double RefreshRateHz;
     }
 
     public static class HdrController
@@ -221,6 +222,8 @@ namespace AdaptiveMedia.Native
                 item.TargetId = path.targetInfo.id;
                 item.OutputTechnology = path.targetInfo.outputTechnology;
                 item.Name = GetName(path.targetInfo.adapterId, path.targetInfo.id);
+                item.RefreshRateHz = path.targetInfo.refreshRate.Denominator == 0 ? 0 :
+                    (double)path.targetInfo.refreshRate.Numerator / path.targetInfo.refreshRate.Denominator;
                 try
                 {
                     GET_COLOR_INFO c = GetColor(path.targetInfo.adapterId, path.targetInfo.id);
