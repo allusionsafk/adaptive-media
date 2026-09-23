@@ -328,10 +328,7 @@ public sealed class PlaybackService
             const string reason = "RTX playback failed. Retrying once with compatibility video and PCM audio.";
             LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason);
             DiagnosticsStore.Event("warning", "fallback", reason);
-            string[] items = plan.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
-            var fallback = PlaybackPlanBuilder.Build(plan.Executable, Path.Combine(AppContext.BaseDirectory, "mpv-config"), items,
-                plan.Requested with { Profile = "Compatibility", UpscaleMode = "HighQuality", RtxHdr = false, MotionMode = "Off" }, plan.Source, plan.Target,
-                new(false, false), "adaptive-media-" + Guid.NewGuid().ToString("N"));
+            var fallback = CompatibilityRetryPlan(plan, Path.Combine(AppContext.BaseDirectory, "mpv-config"));
             LastReport.Plan = fallback;
             var compatibilityRun = await RunOnceAsync(fallback, stopAfterSeconds, gate, PlaybackAttemptKind.Stable);
             code = compatibilityRun.ExitCode;
@@ -702,6 +699,25 @@ public sealed class PlaybackService
         StatusChanged?.Invoke(message);
     }
 
+    /// <summary>The one retry for an RTX player that failed before playing: the
+    /// compatibility path, with no NVIDIA processing. An intent is replaced with the
+    /// planner's own Compatibility intent; left in place, the planner would decide
+    /// the retry afresh and override the compatibility profile with the very
+    /// enhanced path that just failed, while the announcement said compatibility.</summary>
+    internal static PlaybackPlan CompatibilityRetryPlan(PlaybackPlan failed, string configDir)
+    {
+        string[] items = failed.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
+        var options = failed.Requested with
+        {
+            Profile = "Compatibility", UpscaleMode = "HighQuality", RtxHdr = false, MotionMode = "Off",
+            Intent = failed.Requested.Intent is null ? null : EnhancementIntent.ForCompatibility(),
+        };
+        var retry = PlaybackPlanBuilder.Build(failed.Executable, configDir, items, options, failed.Source, failed.Target,
+            new(false, false), "adaptive-media-" + Guid.NewGuid().ToString("N"));
+        // The truth chain explains a path from its plan, so the plan carries why it exists.
+        return retry with { Reasons = retry.Reasons.Insert(0, "The RTX player failed before playback started; this is the single retry on the compatibility path, without NVIDIA processing.") };
+    }
+
     /// <summary>The established stable path for this media, used once the native
     /// lane has run out of runtimes to try. Conservative capabilities, exactly as
     /// the existing compatibility retry uses.</summary>
@@ -810,6 +826,7 @@ public sealed class PlaybackService
         await recoveryStop;
         EndHealth(health, clock, true, process.ExitCode);
         evidence.Finish(health.Snapshot());
+        LastReport!.Delivery.Add(new(health.AttemptId, runtime, evidence.Delivery().Select(v => v.Describe()).ToArray()));
         var final = health.Snapshot();
         // A player that died after it had played claims recovery at exit — unless a
         // stall or freeze already claimed it, in which case this exit is the one
@@ -860,22 +877,31 @@ public sealed class PlaybackService
             if (_nativeAttempts.TryGetValue(plan.PipeName, out var connected)) connected.IpcConnected = true;
             connectedSignal.TrySetResult();
             var timer = Stopwatch.StartNew();
+            // This attempt's own property snapshot. A property the player stops
+            // reporting is removed rather than left over from an earlier poll, so a
+            // later source (an audio-only playlist item, say) cannot inherit it.
+            var observed = new Dictionary<string, JsonElement>();
             while (!cancellation.IsCancellationRequested)
             {
                 using var queryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation); queryTimeout.CancelAfter(TimeSpan.FromSeconds(5));
                 foreach (string name in new[] { "mpv-version", "gpu-api", "gpu-context", "hwdec-current", "vf", "video-codec", "video-params", "video-out-params", "osd-dimensions",
                     "display-fps", "estimated-display-fps", "vsync-jitter", "frame-drop-count", "decoder-frame-drop-count", "vo-delayed-frame-count", "video-sync",
-                    "interpolation", "audio-out-params", "current-ao", "current-vo", "video-target-params", "user-data/adaptive/state" })
+                    "interpolation", "audio-out-params", "current-ao", "current-vo", "video-target-params", "user-data/adaptive/state",
+                    // Delivery evidence: what the renderer and timing actually did.
+                    "time-pos", "playlist-pos", "display-sync-active", "video-speed-correction", "vo-passes",
+                    "user-data/adaptive/source-epoch", "user-data/adaptive/rtx-sr", "user-data/adaptive/rtx-hdr" })
                 {
                     var data = await ipc.CommandAsync(["get_property", name], queryTimeout.Token);
                     if (data.HasValue)
                     {
-                        LastReport!.Observed[name] = data.Value;
+                        observed[name] = name == "vo-passes" ? DeliveryEvidence.CompactPasses(data.Value) : data.Value;
                         if (name == "mpv-version" && data.Value.ValueKind == JsonValueKind.String)
-                            LastReport.MpvVersion = data.Value.GetString() ?? "unknown";
+                            LastReport!.MpvVersion = data.Value.GetString() ?? "unknown";
                     }
+                    else observed.Remove(name);
                 }
-                if (plan.Requested.MotionMode != "Off" && LastReport!.Observed.TryGetValue("video-sync", out var sync) && sync.ValueKind == JsonValueKind.String && sync.GetString() == "audio")
+                LastReport!.Observed = new(observed);
+                if (plan.Requested.MotionMode != "Off" && observed.TryGetValue("video-sync", out var sync) && sync.ValueKind == JsonValueKind.String && sync.GetString() == "audio")
                 {
                     const string reason = "Smooth motion was disabled because display timing became unstable.";
                     if (!LastReport.FallbackHistory.Contains(reason)) { LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason); DiagnosticsStore.Event("warning", "motion-fallback", reason); }
@@ -883,35 +909,35 @@ public sealed class PlaybackService
                 if (_nativeAttempts.TryGetValue(plan.PipeName, out var attempt) &&
                     attempt.Outcome.Plan?.Request is not null && NativeDolbyVision?.Descriptor is not null)
                 {
-                    string? version = LastReport!.Observed.TryGetValue("mpv-version", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                    string? version = observed.TryGetValue("mpv-version", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
                     // Health signals are refreshed on every poll, not only until the
                     // observation settles. Composition can be established from the
                     // first frames while the output chain is still coming up, so
                     // latching these to the settling moment would lose a signal the
                     // healthy-start threshold depends on.
                     if (version is not null) attempt.AdapterSupported = NativeDvDiagnosticAdapters.For(version) is not null;
-                    if (LastReport.Observed.TryGetValue("video-codec", out var codec) && codec.ValueKind == JsonValueKind.String &&
+                    if (observed.TryGetValue("video-codec", out var codec) && codec.ValueKind == JsonValueKind.String &&
                         !string.IsNullOrWhiteSpace(codec.GetString()))
                         attempt.VideoDecoderObserved = true;
                     // mpv only reports real video output dimensions once a decoded
                     // frame has configured the output chain, which is the closest
                     // thing to "a picture reached the display" available here.
-                    if (LastReport.Observed.TryGetValue("video-out-params", out var vo) && vo.ValueKind == JsonValueKind.Object &&
+                    if (observed.TryGetValue("video-out-params", out var vo) && vo.ValueKind == JsonValueKind.Object &&
                         vo.TryGetProperty("w", out var width) && width.TryGetInt32(out int pixels) && pixels > 0)
                         attempt.VideoOutputConfigured = true;
                 }
                 if (attempt is not null && (attempt.Observation is null || attempt.ProvisionalUntil is not null) &&
                     attempt.Outcome.Plan?.Request is not null && NativeDolbyVision?.Descriptor is not null)
                 {
-                    string? version = LastReport!.Observed.TryGetValue("mpv-version", out var v2) && v2.ValueKind == JsonValueKind.String ? v2.GetString() : null;
+                    string? version = observed.TryGetValue("mpv-version", out var v2) && v2.ValueKind == JsonValueKind.String ? v2.GetString() : null;
                     // This attempt's own log, never a shared one: the file is
                     // removed before launch and belongs to this attempt alone.
                     string log = ReadSharedText(attempt.LogPath);
                     var observation = NativeDvLogEvidence.Reduce(log, version,
                         attempt.Outcome.Plan.Request.EnhancementLayer,
-                        LastReport.Observed.TryGetValue("hwdec-current", out var hw) && hw.ValueKind == JsonValueKind.String ? hw.GetString() : null,
-                        LastReport.Observed.TryGetValue("gpu-api", out var api) ? api.ToString() : null,
-                        LastReport.Observed.TryGetValue("gpu-context", out var ctx) ? ctx.ToString() : null);
+                        observed.TryGetValue("hwdec-current", out var hw) && hw.ValueKind == JsonValueKind.String ? hw.GetString() : null,
+                        observed.TryGetValue("gpu-api", out var api) ? api.ToString() : null,
+                        observed.TryGetValue("gpu-context", out var ctx) ? ctx.ToString() : null);
                     // Only settle once the renderer has actually reported; before that
                     // an all-Unknown reading would just be "too early", not a result.
                     bool full = observation.Delivered == NativeDvDelivered.FullEnhancementLayer;
@@ -946,8 +972,8 @@ public sealed class PlaybackService
                 }
                 // This attempt's evidence only: the property snapshot was cleared when
                 // the attempt began, and the native facts are this attempt's own.
-                evidence.Observe(LastReport!.Observed, attempt?.Observation is { } seen ? CompositionFacts(seen) : null);
-                if (LastReport!.Observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
+                evidence.Observe(observed, attempt?.Observation is { } seen ? CompositionFacts(seen) : null);
+                if (observed.TryGetValue("user-data/adaptive/state", out var state) && state.ValueKind == JsonValueKind.String)
                     StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString() + "\n" + PlaybackHealthText.Describe(health.Snapshot().State));
                 if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds)
                 {

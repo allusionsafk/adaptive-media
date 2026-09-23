@@ -19,12 +19,21 @@ internal static class PlaybackTruthTests
         return doc.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
     }
 
+    /// <summary>One attempt's evidence. With <paramref name="playing"/>, the player is
+    /// polled twice with its position advancing, as a real player that is showing
+    /// frames would be; without it, the single poll is from before playback moved.</summary>
     private static PlaybackAttemptEvidence Attempt(long id, PlaybackPlan plan, PlaybackAttemptKind kind = PlaybackAttemptKind.Stable,
-        string json = "{}", NativeCompositionFacts? native = null, SustainedPlaybackHealth? health = null, bool fel = false)
+        string json = "{}", NativeCompositionFacts? native = null, SustainedPlaybackHealth? health = null, bool fel = false, bool playing = false)
     {
         var e = new PlaybackAttemptEvidence(id, (int)id, plan, kind, kind == PlaybackAttemptKind.Stable ? "stable player" : "native generation x",
             kind == PlaybackAttemptKind.Stable ? null : "0.41.0-1044-g14f2d48cb", fel) { Started = true };
-        e.Observe(Props(json), native);
+        var props = Props(json);
+        if (playing)
+        {
+            e.Observe(new Dictionary<string, JsonElement>(props) { ["time-pos"] = JsonSerializer.SerializeToElement(10.0) }, native);
+            props["time-pos"] = JsonSerializer.SerializeToElement(11.0);
+        }
+        e.Observe(props, native);
         if (health is { } h) e.Finish(new PlaybackHealthSnapshot { AttemptId = id, State = h, WorstCondition = h, PlaybackProgressed = true });
         return e;
     }
@@ -43,47 +52,72 @@ internal static class PlaybackTruthTests
 
         // 1. RTX requested, conventional fallback planned: Requested says RTX; Planned and Observed do not.
         {
-            var t = PlaybackTruthBuilder.Build(Attempt(1, noRtxPlan, json: """{"hwdec-current":"nvdec","gpu-api":"vulkan","current-vo":"gpu-next","vf":[]}"""), [], []);
+            var t = PlaybackTruthBuilder.Build(Attempt(1, noRtxPlan, json: """{"hwdec-current":"nvdec","gpu-api":"vulkan","current-vo":"gpu-next","vf":[]}""", playing: true), [], []);
             Check(Has(t.Requested, "RTX Super Resolution"), "requested RTX is shown as requested");
             Check(!Has(t.Planned, "RTX Super Resolution") && !Has(t.Planned, "VPP"), "a conventional plan does not claim RTX");
-            Check(!Has(t.Observed, "RTX") && !Has(t.Observed, "VPP") && Has(t.Observed, "NVDEC active") && Has(t.Observed, "gpu-next · Vulkan active"),
-                "the ordinary Vulkan path is reported from observation");
+            Check(!Has(t.Observed, "RTX") && !Has(t.Observed, "VPP") && Has(t.Observed, "NVDEC hardware decoding: verified (hwdec-current = nvdec)") &&
+                  Has(t.Observed, "gpu-next · Vulkan active"), "the ordinary Vulkan path is reported from observation");
+            var early = PlaybackTruthBuilder.Build(Attempt(1, noRtxPlan, json: """{"hwdec-current":"nvdec"}"""), [], []);
+            Check(!Has(early.Observed, ": verified") && Has(early.Observed, "Not yet observed: NVDEC hardware decoding"),
+                "a decoder reported before playback has moved is not yet evidence of delivery");
             Check(Has(t.Why, "No compatible RTX processing path is available; using conventional scaling."), "why comes from the plan's recorded reason");
         }
 
         // 4. The D3D11 / NVIDIA VPP path, reported only from what the player said.
         {
+            // The shape of a real RTX 4080 poll (mpv 0.41, see EnhancementDeliveryTests).
             string real = """
                 {"hwdec-current":"d3d11va","gpu-api":"d3d11","current-vo":"gpu-next",
                  "vf":[{"name":"d3d11vpp","label":"adaptive-vpp","enabled":true,"params":{"scale":"1.333333","scaling-mode":"nvidia"}}],
-                 "video-params":{"w":1920,"h":1080},"video-out-params":{"w":2560,"h":1440},"osd-dimensions":{"w":2560,"h":1440},
-                 "video-sync":"display-resample","interpolation":true,"estimated-display-fps":239.9,
-                 "video-target-params":{"gamma":"bt.1886"}}
+                 "video-params":{"w":1920,"h":1080,"pixelformat":"d3d11"},"video-out-params":{"w":2560,"h":1440,"pixelformat":"d3d11"},
+                 "osd-dimensions":{"w":2560,"h":1440},"video-sync":"display-resample","interpolation":true,"display-sync-active":true,
+                 "video-speed-correction":0.999,"estimated-display-fps":239.9,"video-target-params":{"gamma":"bt.1886"},
+                 "user-data/adaptive/rtx-sr":"accepted",
+                 "vo-passes":{"fresh":[{"desc":"map frame (hwdec)","count":90},{"desc":"debanding","count":90}],
+                              "redraw":[{"desc":"frame mixing (2 frames), color encoding","count":256}]}}
                 """;
-            var t = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, json: real, health: SustainedPlaybackHealth.Healthy), [], []);
+            var t = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, json: real, health: SustainedPlaybackHealth.Healthy, playing: true), [], []);
             Check(Has(t.Planned, "D3D11VA hardware decoding") && Has(t.Planned, "NVIDIA D3D11 VPP") && Has(t.Planned, "RTX Super Resolution at 1.333×") &&
                   Has(t.Planned, "gpu-next · Direct3D 11") && Has(t.Planned, "Smooth motion (display-resample)"), "RTX plan is described from its arguments");
-            Check(Has(t.Observed, "D3D11VA active") && Has(t.Observed, "NVIDIA VPP active · 1920×1080 → 2560×1440") &&
+            Check(Has(t.Observed, "D3D11VA hardware decoding: verified (hwdec-current = d3d11va)") &&
+                  Has(t.Observed, "NVIDIA VPP scaling: verified (1920×1080 → 2560×1440 on D3D11 video surfaces)") &&
+                  Has(t.Observed, "Temporal blend smoothing: verified (display-resample active") && Has(t.Observed, "Banding reduction: verified") &&
                   Has(t.Observed, "gpu-next · Direct3D 11 active") && Has(t.Observed, "2560×1440 output") &&
-                  Has(t.Observed, "Smooth motion active (display-resample)") && Has(t.Observed, "Display ~240 Hz") && Has(t.Observed, "SDR output"),
+                  Has(t.Observed, "Display ~240 Hz") && Has(t.Observed, "SDR output"),
                 "the real-good path is reported from observation");
-            Check(!Has(t.Observed, "RTX Super Resolution"), "driver-side RTX processing is never shown as observed");
+            Check(Has(t.Observed, "RTX Video Super Resolution: unverified (") && !Has(t.Observed, "Super Resolution: verified") &&
+                  t.Delivery.Single(v => v.Feature == DeliveryFeature.RtxSuperResolution).State == DeliveryState.Unverified,
+                "proven NVIDIA VPP scaling and an accepted driver request are still not proof of RTX Video Super Resolution");
+            Check(t.Fallback.Lines.SequenceEqual(["None observed"]), "nothing fell back on the real-good path");
             Check(Has(t.Why, "RTX Super Resolution selected because a 1080p source is presented at 1440p (1.333×) on compatible NVIDIA hardware."),
                 "why the RTX path was chosen, from recorded plan facts");
             Check(t.Health.Lines[0] == "Healthy" && t.Recovery.Lines.SequenceEqual(["None"]), "healthy ordinary playback, no recovery");
 
+            // Option values echo the launch vector; they are never delivery evidence.
+            var echoed = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, playing: true, json:
+                """{"video-sync":"display-resample","interpolation":true,"deband":true,"hwdec":"d3d11va","scale":"ewa_lanczossharp"}"""), [], []);
+            Check(echoed.Delivery.All(v => v.State != DeliveryState.Verified) && !Has(echoed.Observed, ": verified") && !Has(echoed.Observed, "Smooth motion active"),
+                "option readbacks that merely repeat the plan never populate Observed");
+
             // The filter configured but no scaled output observed: say exactly that.
-            var noScale = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, json: """{"vf":[{"name":"d3d11vpp","enabled":true}],"video-params":{"w":1920,"h":1080},"video-out-params":{"w":1920,"h":1080}}"""), [], []);
-            Check(Has(noScale.Observed, "NVIDIA VPP filter present; no scaling observed") && !Has(noScale.Observed, "VPP active"),
-                "a configured VPP filter without scaled output is not claimed as active");
+            var noScale = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, playing: true, json:
+                """{"vf":[{"name":"d3d11vpp","enabled":true,"params":{"scale":"1.333333","scaling-mode":"nvidia"}}],"video-params":{"w":1920,"h":1080},"video-out-params":{"w":1920,"h":1080,"pixelformat":"d3d11"},"user-data/adaptive/rtx-sr":"accepted"}"""), [], []);
+            Check(Has(noScale.Fallback, "NVIDIA VPP scaling → the filter is configured, but the player reported 1920×1080 d3d11 output") &&
+                  Has(noScale.Fallback, "RTX Video Super Resolution → ") && !Has(noScale.Observed, "VPP scaling: verified"),
+                "a configured VPP filter without scaled output is a fallback, and so is the RTX processing that depended on it");
             var failed = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, json: """{"vf":[],"user-data/adaptive/state":"RTX filter could not be applied; continuing with standard scaling."}"""), [], []);
-            Check(Has(failed.Observed, "RTX filter could not be applied") && !Has(failed.Observed, "VPP active"), "a failed RTX filter is observed as failed");
+            Check(Has(failed.Fallback, "NVIDIA VPP scaling → the VPP filter could not be applied") && !Has(failed.Observed, "VPP scaling: verified"),
+                "a failed RTX filter is a fallback, reported as soon as the player says so");
+            var refused = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, playing: true, json: real.Replace("\"accepted\"", "\"rejected: Failed to enable NVIDIA RTX Super Resolution: E_INVALIDARG\"")), [], []);
+            Check(Has(refused.Fallback, "RTX Video Super Resolution → the NVIDIA driver refused the request (Failed to enable NVIDIA RTX Super Resolution: E_INVALIDARG)") &&
+                  Has(refused.Observed, "NVIDIA VPP scaling: verified"), "a driver refusal is a fallback while VPP scaling itself stays verified");
             var hdr = PlaybackTruthBuilder.Build(Attempt(1, Plan(new(true, true, "RTX", Rtx: true), RtxSmooth with { RtxHdr = true }),
                 json: """{"video-target-params":{"gamma":"bt.1886"}}"""), [], []);
             Check(Has(hdr.Requested, "RTX Video HDR") && Has(hdr.Observed, "SDR output") && !Has(hdr.Observed, "HDR output"),
                 "HDR requested is not HDR output observed");
-            var fallback = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, json: """{"video-sync":"audio"}"""), [], []);
-            Check(Has(fallback.Observed, "Smooth motion not active (timing fallback to audio)"), "a motion fallback is observed as a fallback");
+            var fallback = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, playing: true, json: """{"video-sync":"audio","interpolation":false,"display-sync-active":false}"""), [], []);
+            Check(Has(fallback.Fallback, "Temporal blend smoothing → the player returned to audio-clock timing because display timing was unstable") &&
+                  !Has(fallback.Observed, "Temporal blend smoothing: verified"), "a motion fallback is reported as a fallback");
         }
 
         // 12. No requested or planned feature becomes observed without evidence, over a small plan matrix.
@@ -129,14 +163,14 @@ internal static class PlaybackTruthTests
             Check(Has(t.Observed, "FEL composition observed"), "the replacement's own FEL evidence is reported for it");
 
             // 6. Previous was selected but stable is what launched.
-            var stable = Attempt(2, Plan(new(false, false)), PlaybackAttemptKind.Stable, json: """{"hwdec-current":"nvdec"}""", health: SustainedPlaybackHealth.Healthy);
+            var stable = Attempt(2, Plan(new(false, false)), PlaybackAttemptKind.Stable, json: """{"hwdec-current":"nvdec"}""", health: SustainedPlaybackHealth.Healthy, playing: true);
             var redirected = toPrevious with { LaunchedAttempt = 2, LaunchedKind = PlaybackAttemptKind.Stable, LaunchedRuntime = "stable player", LaunchedResumeAt = 2537 };
             var s = PlaybackTruthBuilder.Build(stable, [failed], [redirected]);
             Check(s.Recovery.Lines.Single().EndsWith("→ Stable playback · resumed near 00:42:17") && !s.Recovery.Lines.Single().Contains("Previous"),
                 "a selected previous runtime that never launched is never reported; stable is");
             Check(Has(s.Why, "Stable playback selected after") && !Has(s.Why, "Previous verified runtime selected"), "why names stable");
             // 8. The stale FEL attempt cannot populate the stable attempt's Observed.
-            Check(!Has(s.Observed, "FEL") && !Has(s.Observed, "Composition") && Has(s.Observed, "NVDEC active"), "stale attempt evidence cannot populate Observed");
+            Check(!Has(s.Observed, "FEL") && !Has(s.Observed, "Composition") && Has(s.Observed, "Automatic hardware decoding: verified (hwdec-current = nvdec)"), "stale attempt evidence cannot populate Observed");
 
             // 7. Resume shown only from the launched plan, never from the selected point.
             var noResume = toPrevious with { LaunchedResumeAt = null };

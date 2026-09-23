@@ -16,6 +16,8 @@ public sealed class PlaybackAttemptEvidence
 {
     private readonly object _gate = new();
     private Dictionary<string, JsonElement> _observed = [];
+    private DeliveryLatch _latch = DeliveryLatch.Empty;
+    private bool _finished;
     private NativeCompositionFacts? _native;
     private PlaybackHealthSnapshot? _health;
     private Func<PlaybackHealthSnapshot>? _liveHealth;
@@ -37,17 +39,33 @@ public sealed class PlaybackAttemptEvidence
     public bool Started { get; set; }
 
     /// <summary>Replace this attempt's property snapshot. Copied, so later
-    /// mutation of the caller's dictionary cannot reach it.</summary>
+    /// mutation of the caller's dictionary cannot reach it. A finished attempt
+    /// accepts nothing more: a late poll cannot rewrite what it established.</summary>
     public void Observe(IReadOnlyDictionary<string, JsonElement> properties, NativeCompositionFacts? native)
     {
         var copy = properties.ToDictionary(x => x.Key, x => x.Value.Clone());
-        lock (_gate) { _observed = copy; if (native is not null) _native = native; }
+        lock (_gate)
+        {
+            if (_finished) return;
+            _observed = copy;
+            _latch = _latch.Fold(copy);
+            if (native is not null) _native = native;
+        }
     }
 
     /// <summary>This attempt's own live health, read until the attempt finishes.</summary>
     public void TrackHealth(Func<PlaybackHealthSnapshot> live) { lock (_gate) _liveHealth = live; }
 
-    public void Finish(PlaybackHealthSnapshot? health) { lock (_gate) { _health = health; _liveHealth = null; } }
+    public void Finish(PlaybackHealthSnapshot? health) { lock (_gate) { _health = health; _liveHealth = null; _finished = true; } }
+
+    /// <summary>Whether each path this attempt's own plan asked for was delivered,
+    /// judged only from this attempt's own runtime evidence.</summary>
+    public IReadOnlyList<DeliveryVerdict> Delivery()
+    {
+        Dictionary<string, JsonElement> observed; DeliveryLatch latch; bool finished;
+        lock (_gate) { observed = _observed; latch = _latch; finished = _finished; }
+        return EnhancementDeliveryVerifier.Verify(Plan, observed, latch, Started, finished);
+    }
 
     public (IReadOnlyDictionary<string, JsonElement> Observed, NativeCompositionFacts? Native, PlaybackHealthSnapshot? Health) Read()
     {
@@ -67,10 +85,10 @@ public sealed record PlaybackTruthSection(string Title, IReadOnlyList<string> Li
 /// observed, health, recovery, and why. Every observed line comes from the
 /// current attempt's own evidence; earlier attempts appear only as history.</summary>
 public sealed record PlaybackTruthReport(PlaybackTruthSection Intent, PlaybackTruthSection Requested, PlaybackTruthSection Planned,
-    PlaybackTruthSection Observed, PlaybackTruthSection Health, PlaybackTruthSection Recovery,
-    PlaybackTruthSection Why, IReadOnlyList<PlaybackTruthSection> History, string Headline)
+    PlaybackTruthSection Observed, PlaybackTruthSection Fallback, PlaybackTruthSection Health, PlaybackTruthSection Recovery,
+    PlaybackTruthSection Why, IReadOnlyList<PlaybackTruthSection> History, string Headline, IReadOnlyList<DeliveryVerdict> Delivery)
 {
-    public IEnumerable<PlaybackTruthSection> Sections => [Intent, Requested, Planned, Observed, Health, Recovery, Why];
+    public IEnumerable<PlaybackTruthSection> Sections => [Intent, Requested, Planned, Observed, Fallback, Health, Recovery, Why];
 
     /// <summary>The expandable detail text.</summary>
     public string Format()
@@ -110,10 +128,13 @@ public static class PlaybackTruthBuilder
     {
         ArgumentNullException.ThrowIfNull(current);
         var (observed, native, health) = current.Read();
+        var delivery = current.Delivery();
         var intent = IntentLines(current.Plan);
         var requested = Requested(current);
         var planned = Planned(current);
-        var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started);
+        var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started, delivery);
+        var fallbackLines = delivery.Where(v => v.State == DeliveryState.FellBack).Select(v => v.Label + " → " + v.Evidence).ToList();
+        if (fallbackLines.Count == 0) fallbackLines.Add("None observed");
         var healthLines = new List<string> { HealthText.Describe(health?.State ?? SustainedPlaybackHealth.Starting) };
         if (health is { } h && h.WorstCondition is not (SustainedPlaybackHealth.Healthy or SustainedPlaybackHealth.Starting) &&
             h.WorstCondition != h.State)
@@ -126,7 +147,8 @@ public static class PlaybackTruthBuilder
         var lastRecovery = recovery.LastOrDefault();
         if (lastRecovery is not null) headline += "\nRecovery: " + RecoveryOutcome(lastRecovery);
         return new(new("Intent", intent), new("Requested", requested), new("Planned", planned), new("Observed", observedLines),
-            new("Playback health", healthLines), new("Recovery", recoveryLines), new("Why this path?", why), history, headline);
+            new("Fallback", fallbackLines), new("Playback health", healthLines), new("Recovery", recoveryLines),
+            new("Why this path?", why), history, headline, delivery);
     }
 
     private static List<string> IntentLines(PlaybackPlan plan)
@@ -265,12 +287,15 @@ public static class PlaybackTruthBuilder
     }
 
     /// <summary>Only what this attempt's player reported. Anything not reported is
-    /// left out rather than filled in from the plan.</summary>
+    /// left out rather than filled in from the plan. Planned enhancement paths are
+    /// reported through their delivery verdicts, which come from runtime evidence;
+    /// the ones that fell back are listed under Fallback instead.</summary>
     public static List<string> Observed(PlaybackPlan plan, IReadOnlyDictionary<string, JsonElement> observed,
-        NativeCompositionFacts? native, bool nativeAttempt, bool started)
+        NativeCompositionFacts? native, bool nativeAttempt, bool started, IReadOnlyList<DeliveryVerdict>? delivery = null)
     {
         var lines = new List<string>();
         if (!started) { lines.Add("Nothing observed: the player did not start."); return lines; }
+        delivery ??= [];
         if (nativeAttempt)
         {
             if (native is null || !native.RendererActive) lines.Add("Composition not yet observed");
@@ -281,28 +306,23 @@ public static class PlaybackTruthBuilder
             }
             else lines.Add(native.Delivered == "BaseLayerOnly" ? "Base layer only; the enhancement layer was not composed" : "Composition unknown");
         }
-        switch (Text(observed, "hwdec-current"))
+        if (observed.Count > 0)
         {
-            case null: break;
-            case "no" or "": lines.Add("Software decoding"); break;
-            case "d3d11va": lines.Add("D3D11VA active"); break;
-            case "nvdec": lines.Add("NVDEC active"); break;
-            case var other: lines.Add(other + " decoding active"); break;
+            foreach (var verdict in delivery.Where(v => v.State is DeliveryState.Verified or DeliveryState.Unverified or DeliveryState.NotNeeded))
+                lines.Add(verdict.Describe());
+            var pending = delivery.Where(v => v.State == DeliveryState.Pending).Select(v => v.Label).ToArray();
+            if (pending.Length > 0) lines.Add("Not yet observed: " + string.Join(", ", pending));
         }
-        // A configured VPP filter is not proof that the driver processed a frame;
-        // only a scaled output reported by the player is shown as scaling.
-        if (observed.TryGetValue("vf", out var vf) && vf.ValueKind == JsonValueKind.Array &&
-            vf.EnumerateArray().Any(f => f.TryGetProperty("name", out var n) && n.GetString() == "d3d11vpp" &&
-                                         (!f.TryGetProperty("enabled", out var e) || e.ValueKind != JsonValueKind.False)))
-        {
-            var input = Size(observed, "video-params");
-            var output = Size(observed, "video-out-params");
-            lines.Add(input is { } i && output is { } o && (o.W > i.W || o.H > i.H)
-                ? $"NVIDIA VPP active · {i.W}×{i.H} → {o.W}×{o.H}"
-                : "NVIDIA VPP filter present; no scaling observed");
-        }
-        if (Text(observed, "user-data/adaptive/state") is { } state && state.Contains("could not be applied", StringComparison.Ordinal))
-            lines.Add("RTX filter could not be applied; standard scaling");
+        // With no decoder planned there is no verdict, but the decoder in use is still a fact.
+        if (!delivery.Any(v => v.Feature == DeliveryFeature.HardwareDecoding))
+            switch (Text(observed, "hwdec-current"))
+            {
+                case null: break;
+                case "no" or "": lines.Add("Software decoding"); break;
+                case "d3d11va": lines.Add("D3D11VA active"); break;
+                case "nvdec": lines.Add("NVDEC active"); break;
+                case var other: lines.Add(other + " decoding active"); break;
+            }
         string? api = Text(observed, "gpu-api");
         string? vo = Text(observed, "current-vo");
         if (vo is not null || api is not null)
@@ -311,14 +331,6 @@ public static class PlaybackTruthBuilder
         if (observed.TryGetValue("video-target-params", out var target) && target.ValueKind == JsonValueKind.Object &&
             target.TryGetProperty("gamma", out var gamma) && gamma.ValueKind == JsonValueKind.String)
             lines.Add(gamma.GetString() is "pq" or "hlg" ? "HDR output (" + gamma.GetString()!.ToUpperInvariant() + ")" : "SDR output");
-        string? sync = Text(observed, "video-sync");
-        if (sync == "display-resample")
-        {
-            bool interpolating = observed.TryGetValue("interpolation", out var interp) && interp.ValueKind == JsonValueKind.True;
-            lines.Add(interpolating ? "Smooth motion active (display-resample)" : "Display-resample active without interpolation");
-        }
-        else if (sync is not null && Argument(plan, "--video-sync") == "display-resample")
-            lines.Add("Smooth motion not active (timing fallback to " + sync + ")");
         if (observed.TryGetValue("estimated-display-fps", out var fps) && fps.ValueKind == JsonValueKind.Number && fps.GetDouble() > 0)
             lines.Add($"Display ~{fps.GetDouble():0} Hz");
         if (lines.Count == 0) lines.Add("Nothing observed yet");
@@ -377,6 +389,11 @@ public static class PlaybackTruthBuilder
         if (attempt.Kind != PlaybackAttemptKind.Stable)
             lines.Add(native is null || !native.RendererActive ? "Composition not observed"
                 : native.FelComposed ? "Full FEL observed" : native.Delivered == "BaseLayerOnly" ? "Base layer only" : "Composition unknown");
+        // What that attempt itself established; it stays with that attempt.
+        var delivery = attempt.Delivery();
+        string Names(DeliveryState state) => string.Join(", ", delivery.Where(v => v.State == state).Select(v => v.Label));
+        if (Names(DeliveryState.Verified) is { Length: > 0 } verified) lines.Add("Verified: " + verified);
+        if (Names(DeliveryState.FellBack) is { Length: > 0 } fellBack) lines.Add("Fell back: " + fellBack);
         lines.Add(health is null ? "Health not established" : HealthText.Describe(health.WorstCondition is SustainedPlaybackHealth.Stalled or SustainedPlaybackHealth.Frozen
             ? health.WorstCondition : health.State));
         if (recovery.FirstOrDefault(r => r.FailedAttempt == attempt.AttemptId) is { } r) lines.Add("Recovery → " + RecoveryOutcome(r));
