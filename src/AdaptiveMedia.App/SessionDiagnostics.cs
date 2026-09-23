@@ -18,6 +18,9 @@ public sealed class SessionDiagnostics
     public List<string> FallbackHistory { get; set; } = [];
     /// <summary>Final sustained playback health of each attempt, in order.</summary>
     public List<PlaybackHealthReport> PlaybackHealth { get; } = [];
+    /// <summary>What each started attempt's own runtime evidence established about the
+    /// enhancement paths its plan asked for, in order.</summary>
+    public List<AttemptDeliveryReport> Delivery { get; } = [];
     /// <summary>Automatic recovery decisions made during this playback, in order.</summary>
     public List<PlaybackRecoveryRecord> Recovery { get; } = [];
     /// <summary>The user-facing truth chain at the end of playback.</summary>
@@ -52,7 +55,7 @@ public static class DiagnosticsStore
                 x.StartsWith("--ytdl-format=") ? "--ytdl-format=[selected]" : x) } : null;
         string text = Redact(JsonSerializer.Serialize(new { report.Version, report.Windows, report.Started, report.Source,
             report.Hardware, Plan = ShareablePlan(report.Plan), Attempts = report.Attempts.Select(ShareablePlan), report.MpvVersion, report.RtxDriverActiveVerified, report.Observed,
-            report.FallbackHistory, report.PlaybackHealth, report.Recovery, report.TruthChain, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
+            report.FallbackHistory, report.PlaybackHealth, report.Delivery, report.Recovery, report.TruthChain, report.ExitCode, Error = report.Error is null ? null : "Playback/helper error; see application message.", report.Summary }, Json));
         string path = Path.Combine(DirectoryPath, "latest.json");
         File.WriteAllText(path + ".tmp", text); File.Move(path + ".tmp", path, true);
         File.WriteAllText(Path.Combine(DirectoryPath, "latest.txt"), Redact(report.Summary + "\n" + string.Join("\n", report.FallbackHistory)));
@@ -75,6 +78,9 @@ public static class DiagnosticsStore
         catch (UnauthorizedAccessException) { }
     }
 }
+
+/// <summary>One attempt's delivery verdicts, as the truth surface words them.</summary>
+public sealed record AttemptDeliveryReport(long Attempt, string Runtime, IReadOnlyList<string> Verdicts);
 
 /// <summary>The shareable, bounded form of one attempt's sustained health: states
 /// by name, counts, and the retained transitions. No raw per-poll samples.</summary>

@@ -7,6 +7,32 @@ local timer, last, failed = nil, nil, false
 local function state(text)
     mp.set_property_native('user-data/adaptive/state', text)
 end
+
+-- Driver acknowledgements for this player process only. mpv logs whether the
+-- NVIDIA driver accepted each VPP extension request; acceptance is recorded as
+-- exactly that, and is never proof that the driver processed a frame with it.
+-- Verbose messages are subscribed to only on the RTX lane.
+local rtx = options.sr == 'yes' or options.hdr == 'yes'
+local function driver(name, value)
+    mp.set_property_native('user-data/adaptive/' .. name, value)
+end
+if rtx then
+    mp.enable_messages('v')
+    mp.register_event('log-message', function(e)
+        if e.prefix ~= 'd3d11vpp' then return end
+        local text = (e.text or ''):gsub('%s+$', '')
+        if text:find('NVIDIA RTX Super Resolution enabled', 1, true) then
+            driver('rtx-sr', 'accepted')
+        elseif text:find('Failed to enable NVIDIA RTX Super Resolution', 1, true) then
+            driver('rtx-sr', 'rejected: ' .. text)
+        elseif text:find('NVIDIA RTX Video HDR enabled', 1, true) then
+            driver('rtx-hdr', 'accepted')
+        elseif text:find('Failed to enable NVIDIA RTX Video HDR', 1, true) or text:find('NVIDIA RTX Video HDR not supported', 1, true)
+            or text:find('NVIDIA RTX Video HDR requested, but', 1, true) or text:find('is not supported for NVIDIA RTX Video HDR', 1, true) then
+            driver('rtx-hdr', 'rejected: ' .. text)
+        end
+    end)
+end
 local function update()
     if failed then return end
     if options.sr ~= 'yes' and options.hdr ~= 'yes' then return end
@@ -53,7 +79,16 @@ local function schedule()
 end
 mp.observe_property('osd-dimensions', 'native', schedule)
 mp.observe_property('video-params', 'native', schedule)
-mp.register_event('file-loaded', function() last = nil; failed = false; schedule() end)
+-- Each loaded file is a new source: delivery evidence restarts from it, and an
+-- acknowledgement for the previous file's filter says nothing about this one.
+local epoch = 0
+mp.register_event('file-loaded', function()
+    last = nil; failed = false
+    epoch = epoch + 1
+    mp.set_property_native('user-data/adaptive/source-epoch', epoch)
+    if rtx then driver('rtx-sr', 'pending'); driver('rtx-hdr', 'pending') end
+    schedule()
+end)
 
 -- Keep the established measured motion guard; show its effective fallback in playback.
 local had_interpolation = mp.get_property_native('interpolation', false)

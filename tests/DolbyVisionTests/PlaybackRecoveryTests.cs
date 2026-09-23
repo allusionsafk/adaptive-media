@@ -89,6 +89,8 @@ internal static class PlaybackRecoveryTests
                         "video-codec" when mode != "partial" && mode != "silent" && mode != "reject-stop" => "hevc",
                         "video-out-params" when mode != "partial" && mode != "silent" && mode != "reject-stop" => new { w = 3840, h = 2160 },
                         "hwdec-current" when composes || mode == "late-compose" => "d3d11va",
+                        // A replacement that plays decodes in software, so any hardware claim for it would have to be inherited.
+                        "hwdec-current" when mode == "play" => "no",
                         "gpu-api" => "d3d11",
                         "gpu-context" => "d3d11",
                         "time-pos" when progresses => Position(),
@@ -233,6 +235,24 @@ internal static class PlaybackRecoveryTests
                 // Verify selected stable routing before allowing a synthetic launch.
                 var stablePlan = (PlaybackPlan)typeof(PlaybackService).GetMethod("BuildStableFallbackPlan", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(service, [plan])!;
                 check(stablePlan.Executable == stableExe, "RECOVERY: stable fallback preserves the runtime selected during preparation");
+                // The RTX compatibility retry must really be the compatibility path. With a
+                // planner intent it was re-decided into an enhanced Vulkan plan (observed on
+                // an RTX 4080) while the announcement said compatibility.
+                var rtxIntent = PlaybackPlanBuilder.Build("mpv.exe", "config", ["movie.mkv"], new("Enhanced", "Off", "Off", false, false,
+                        Intent: EnhancementIntent.ForEnhanced(DetailIntent.Maximum, MotionIntent.BlendSmooth, CleanupIntent.Clean, PerformanceIntent.MaximumQuality)),
+                    new MediaInfo(960, 540, 25, "h264", "bt.1886", "bt.709"), new(2048, 1152, RefreshRateHz: 240), new(true, true, "RTX", Rtx: true), "rtx");
+                foreach (var failedRtx in new[] { rtxIntent, rtxIntent with { Requested = new("Enhanced", "RtxVsr", "Smooth", true, false), Intent = null, Decision = null } })
+                {
+                    var retry = PlaybackService.CompatibilityRetryPlan(failedRtx, "config");
+                    var args = retry.Arguments.TakeWhile(x => x != "--").ToArray();
+                    check(retry.Renderer == "Compatibility D3D11" && args.Contains("--profile=compatibility") && !args.Contains("--profile=enhanced") &&
+                          !args.Any(x => x.StartsWith("--vf=") || x == "--interpolation=yes" || x == "--video-sync=display-resample") &&
+                          PlannedDelivery.From(retry) is { Decoder: "d3d11va-copy", VppScaling: false, RtxSuperResolution: false, DisplayResample: false },
+                        "DELIVERY: the RTX compatibility retry is the compatibility path it announces (" + (failedRtx.Intent is null ? "legacy" : "intent") + ")");
+                }
+                check(PlaybackService.CompatibilityRetryPlan(rtxIntent, "config") is { Intent.Mode: EnhancementMode.Compatibility } intentRetry &&
+                      intentRetry.Reasons[0].StartsWith("The RTX player failed before playback started"),
+                    "DELIVERY: an intent-driven retry is planned from the planner's Compatibility intent, and says why it exists");
                 Mode(a, "fail"); Mode(b, "partial");
                 await service.LaunchAsync(plan, 0);
                 check(service.LastReport!.Attempts.Count == 3 && service.LastReport.Attempts.Take(2).Select(x => x.Executable).Distinct().Count() == 2, "RECOVERY: exactly A then B then stable, with no third native launch");
@@ -316,6 +336,21 @@ internal static class PlaybackRecoveryTests
                         tag + "TRUTH: the failed attempt's FEL is history only; the replacement's Observed is its own");
                     check(truth.Health.Lines[0] == "Stopped by user" && truth.Planned.Lines.Any(x => x.Contains("(previous)")) &&
                           truth.Planned.Lines.Any(x => x.StartsWith("Start near 00:00:")), tag + "TRUTH: current attempt planned/health are the replacement's");
+                    // Delivery evidence stays with the attempt that produced it.
+                    check(truth.Delivery.Single(v => v.Feature == DeliveryFeature.HardwareDecoding).State == DeliveryState.FellBack &&
+                          truth.Fallback.Lines.Contains("D3D11VA hardware decoding → software decoding observed (hwdec-current = no)") &&
+                          !truth.Observed.Lines.Any(x => x.Contains(": verified")),
+                        tag + "DELIVERY: the replacement reports its own software-decoding fallback, not the failed attempt's D3D11VA");
+                    // A frozen or crashing peer stops answering about a second in, before
+                    // its monitor has seen playback advance, so only the stalling peer,
+                    // which keeps answering, is guaranteed to have established delivery.
+                    string failedDelivery = report.Delivery[0].Verdicts.Single();
+                    check(report.Delivery.Count == 2 && report.Delivery[0].Attempt != report.Delivery[1].Attempt &&
+                          failedDelivery.StartsWith("D3D11VA hardware decoding: ") && !failedDelivery.Contains("fell back") &&
+                          report.Delivery[1].Verdicts.Single().StartsWith("D3D11VA hardware decoding: fell back") &&
+                          (failure != "stall" || failedDelivery == "D3D11VA hardware decoding: verified (hwdec-current = d3d11va)" &&
+                              truth.History.Single().Lines.Contains("Verified: D3D11VA hardware decoding")),
+                        tag + "DELIVERY: each attempt keeps its own record; a verification the failed attempt made stays in its history");
                     check(!report.FallbackHistory.Any(x => x.StartsWith("Live diagnostics unavailable")) &&
                           report.FallbackHistory.Count(x => x.StartsWith("Detailed live diagnostics stopped")) <= 1 && report.TruthChain is not null,
                         tag + "TRUTH: no duplicated diagnostics line; the truth chain is saved with the report");
@@ -363,6 +398,11 @@ internal static class PlaybackRecoveryTests
                         check(!report.FallbackHistory.Any(x => x.Contains("Recovery: Previous")) && (report.TruthChain ?? "").Contains("→ Stable playback"),
                             "TRUTH: no status line or saved report claims the previous runtime");
                         check(!truth.Observed.Lines.Any(x => x.Contains("FEL") || x.Contains("Composition")), "TRUTH: stable Observed carries no native evidence");
+                        check(truth.Delivery.Single(v => v.Feature == DeliveryFeature.HardwareDecoding) is { State: DeliveryState.FellBack, Label: "Automatic hardware decoding" } &&
+                              !truth.Observed.Lines.Any(x => x.Contains(": verified")) && !truth.History[0].Lines.Any(x => x.StartsWith("Fell back")) &&
+                              report.Delivery.Count == 2 && report.Delivery[0].Verdicts.Single().StartsWith("D3D11VA hardware decoding: ") &&
+                              report.Delivery[1].Verdicts.Single().StartsWith("Automatic hardware decoding: fell back"),
+                            "DELIVERY: native → stable: the stable attempt is judged against its own plan and evidence; the native D3D11VA verification stays in history");
                     }
                     finally { File.WriteAllText(state, original); }
                 }
