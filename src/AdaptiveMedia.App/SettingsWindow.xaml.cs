@@ -9,6 +9,7 @@ public partial class SettingsWindow : Window
     public SettingsWindow(AppSettings settings)
     {
         InitializeComponent();
+        WindowTheme.UseDarkFrame(this);
         ResultSettings = settings;
         HdrCheck.IsChecked = settings.AutoHdrSwitch;
         ExternalCheck.IsChecked = settings.PreferExternalDisplay;

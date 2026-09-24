@@ -7,6 +7,9 @@ using System.Text.Json;
 using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
 
 namespace AdaptiveMedia;
 
@@ -25,33 +28,32 @@ public partial class MainWindow : Window
     private bool _displayChanged;
     private long _generation;
     private bool _playing, _uiReady, _closed, _closeAfterPlayback;
+    // The truth chain describes the last playback; it is shown only while the media on
+    // screen is the media that playback was of.
+    private bool _truthIsCurrent;
+    private PlaybackPlan? _launchedPlan;
     private readonly System.Windows.Threading.DispatcherTimer _truthRefresh = new() { Interval = TimeSpan.FromSeconds(2) };
-
-    private void RefreshTruth()
-    {
-        if (_backend.Playback.CurrentTruth() is not { } truth) return;
-        TruthText.Text = truth.Format();
-        TruthExpander.Visibility = Visibility.Visible;
-    }
-
-    private void TruthExpander_Expanded(object sender, RoutedEventArgs e) => RefreshTruth();
 
     public MainWindow(string[] startupItems)
     {
         InitializeComponent();
+        WindowTheme.UseDarkFrame(this);
         _backend.Playback.StatusChanged += text => Dispatcher.InvokeAsync(() =>
         {
-            if (!_closed && _playing) RuntimeText.Text = text;
+            if (!_closed && _playing) RuntimeText.Text = PlaybackPresentation.ActivityText(text, _launchedPlan?.Summary ?? "");
         });
-        // The detail surface refreshes at a calm pace, and only while someone is
-        // looking at it; the concise activity text stays the normal view.
-        _truthRefresh.Tick += (_, _) => { if (TruthExpander.IsExpanded) RefreshTruth(); };
+        SizeChanged += (_, _) => UpdatePageLayout();
+        AutomaticChoices.SizeChanged += (_, e) => LayoutGoalChoice(e.NewSize.Width);
+        // Health and the detail surface refresh at a calm pace while playing; the
+        // details are only rebuilt while someone is looking at them.
+        _truthRefresh.Tick += (_, _) => RefreshPlaybackState();
         _startupItems = startupItems.Where(x => !x.StartsWith("--", StringComparison.Ordinal)).ToArray();
         Loaded += MainWindow_Loaded;
+        PreviewKeyDown += MainWindow_PreviewKeyDown;
         SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
         Closing += (_, e) => { if (_playing) { e.Cancel = true; _closeAfterPlayback = true; Hide(); } };
         Closed += (_, _) => { _closed = true; _previewCancellation?.Cancel(); SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged; };
-        foreach (var box in new[] { ProfileBox, AutomaticGoalBox, AutomaticStrengthBox, AutomaticPerformanceBox,
+        foreach (var box in new Selector[] { ProfileBox, AutomaticGoalBox, AutomaticStrengthBox, AutomaticPerformanceBox,
                      EnhancedDetailBox, EnhancedMotionBox, EnhancedCleanupBox, EnhancedPerformanceBox })
             box.SelectionChanged += OptionsChanged;
     }
@@ -69,12 +71,14 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string ComboValue(ComboBox box) => box.SelectedItem is ComboBoxItem item
+    // Choice values are the items' Tags (the persisted settings vocabulary), so the
+    // visible wording can change without changing what is stored.
+    private static string ComboValue(Selector box) => box.SelectedItem is ListBoxItem item
         ? item.Tag?.ToString() ?? item.Content?.ToString() ?? "Off" : "Off";
 
-    private static void SelectCombo(ComboBox box, string value)
+    private static void SelectCombo(Selector box, string value)
     {
-        foreach (var entry in box.Items.OfType<ComboBoxItem>())
+        foreach (var entry in box.Items.OfType<ListBoxItem>())
             if (string.Equals(entry.Tag?.ToString() ?? entry.Content?.ToString(), value, StringComparison.OrdinalIgnoreCase))
             { box.SelectedItem = entry; return; }
         box.SelectedIndex = 0;
@@ -93,6 +97,7 @@ public partial class MainWindow : Window
         SelectCombo(EnhancedCleanupBox, _settings.EnhancedCleanup);
         SelectCombo(EnhancedPerformanceBox, _settings.EnhancementPerformance);
         UpdatePreferenceVisibility();
+        ShowGoalExplanation();
         _uiReady = ready;
     }
 
@@ -123,7 +128,7 @@ public partial class MainWindow : Window
     private void ShowSettingsWarning()
     {
         SettingsWarningText.Text = SettingsStore.LastWarning ?? "";
-        SettingsWarningText.Visibility = string.IsNullOrEmpty(SettingsWarningText.Text) ? Visibility.Collapsed : Visibility.Visible;
+        SettingsWarning.Visibility = string.IsNullOrEmpty(SettingsWarningText.Text) ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void SavePlaybackDefaults()
@@ -167,10 +172,33 @@ public partial class MainWindow : Window
         }));
     }
 
-    private async void OptionsChanged(object sender, RoutedEventArgs e)
+    private async void OptionsChanged(object sender, SelectionChangedEventArgs e)
     {
+        // A choice group always has an answer: Ctrl+click must not leave it empty.
+        if (sender is Selector box && box.SelectedItem is null && e.RemovedItems.Count > 0)
+        {
+            box.SelectedItem = e.RemovedItems[0];
+            return;
+        }
         if (ReferenceEquals(sender, ProfileBox)) UpdatePreferenceVisibility();
+        if (ReferenceEquals(sender, AutomaticGoalBox)) ShowGoalExplanation();
         if (_uiReady && !_playing) await RefreshPreviewAsync(debounce: true);
+    }
+
+    /// <summary>The chosen result is explained once, beside the list, rather than on
+    /// every option.</summary>
+    private void ShowGoalExplanation() => GoalExplanation.Text = AutomaticGoalBox.SelectedItem is ListBoxItem item
+        ? System.Windows.Automation.AutomationProperties.GetHelpText(item) : "";
+
+    /// <summary>Side by side when there is room; the explanation and strength move
+    /// under the list on a narrow page.</summary>
+    private void LayoutGoalChoice(double width)
+    {
+        bool stacked = width < 680;
+        Grid.SetColumn(GoalDetail, stacked ? 0 : 1);
+        Grid.SetRow(GoalDetail, stacked ? 1 : 0);
+        GoalColumn.Width = stacked ? new GridLength(1, GridUnitType.Star) : new GridLength(380);
+        GoalDetail.Margin = stacked ? new Thickness(0, 24, 0, 0) : new Thickness(8, 8, 0, 0);
     }
 
     private void UpdatePreferenceVisibility()
@@ -192,10 +220,52 @@ public partial class MainWindow : Window
         if (_playing || _closed) return;
         _pendingItems = items.ToArray();
         _pendingFormat = format;
-        SelectedMediaText.Text = items.Count == 1 ? items[0] : $"{items.Count} selected items\n" + string.Join("\n", items);
+        _truthIsCurrent = false;
+        ShowSelectedMedia();
         RuntimeText.Text = "Playback has not started. Driver activity is checked during playback where observable.";
         await RefreshPreviewAsync();
     }
+
+    /// <summary>Switches the hero from the open prompt to the chosen media. The open
+    /// actions stay available but step back to quiet tools.</summary>
+    private void ShowSelectedMedia()
+    {
+        Page.VerticalAlignment = VerticalAlignment.Top;
+        DetailsToggle.Visibility = Visibility.Visible;
+        HeroEyebrow.Text = "Ready to play";
+        HeroEyebrow.Visibility = Visibility.Visible;
+        HeroTitle.Text = PlaybackPresentation.MediaTitle(_pendingItems);
+        HeroTitle.FontSize = 38;
+        HeroBody.Text = "Checking this media…";
+        SelectedMediaText.Text = _pendingItems.Length == 1 ? _pendingItems[0] : string.Join("   ·   ", _pendingItems);
+        SelectedMediaText.ToolTip = string.Join("\n", _pendingItems);
+        SelectedMediaText.Visibility = Visibility.Visible;
+        PlayRow.Visibility = Visibility.Visible;
+        var tool = (Style)FindResource("Dm.GhostButton");
+        OpenFileButton.Style = OpenFolderButton.Style = OpenUrlButton.Style = tool;
+        MediaActions.Margin = new Thickness(0, 22, 0, 0);
+        DropZone.Visibility = Visibility.Collapsed;
+        DropColumn.Width = new GridLength(0);
+        PlaybackChoices.Visibility = PlanSection.Visibility = Visibility.Visible;
+        AttentionCard.Visibility = Visibility.Collapsed;
+        UpdatePageLayout();
+        if (DetailsDrawer.Visibility == Visibility.Visible) RenderDetails();
+    }
+
+    /// <summary>Docks the details beside the page when both fit; on a narrow window it
+    /// overlays the page from the right instead of crushing the choices.</summary>
+    private void UpdatePageLayout()
+    {
+        bool open = DetailsDrawer.Visibility == Visibility.Visible;
+        bool overlay = open && ActualWidth > 0 && ActualWidth < 1040;
+        Grid.SetColumn(DetailsDrawer, overlay ? 0 : 1);
+        DetailsDrawer.HorizontalAlignment = overlay ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        DetailsDrawer.Effect = overlay ? new System.Windows.Media.Effects.DropShadowEffect
+            { Color = Colors.Black, Opacity = 0.35, BlurRadius = 30, ShadowDepth = 0 } : null;
+        double side = open && !overlay ? 40 : 56;
+        Page.Margin = new Thickness(side, _pendingItems.Length == 0 ? 40 : 44, side, 72);
+    }
+
 
     private async Task RefreshPreviewAsync(bool debounce = false)
     {
@@ -229,14 +299,18 @@ public partial class MainWindow : Window
             _preparedOptions = options;
             _preparedSourceStamp = SourceStamp(plan);
             _displayChanged = false;
-            PlanText.Text = plan.Summary;
+            var (source, planLines) = PlaybackPresentation.SplitSummary(plan.Summary);
+            HeroBody.Text = PlaybackPresentation.SourceLine(plan.Source, source);
+            PlanText.Text = planLines.Count > 0 ? string.Join("\n", planLines) : plan.Summary;
             StatusText.Text = "Plan ready — review your choices, then Play";
             PlayButton.IsEnabled = !_playing;
+            if (DetailsDrawer.Visibility == Visibility.Visible) RenderDetails();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             if (generation != _generation || _closed) return;
+            HeroBody.Text = "This media could not be prepared.";
             PlanText.Text = "Could not prepare this media. Choose another source or adjust your choices.\n" + ex.Message;
             StatusText.Text = "Plan unavailable";
         }
@@ -254,19 +328,25 @@ public partial class MainWindow : Window
         if (_playing || _closed || _preparedPlan is not { } plan) return;
         if (_preparedOptions != CurrentOptions() || _displayChanged || _preparedSourceStamp != SourceStamp(plan)) { await RefreshPreviewAsync(); return; }
         _playing = true;
+        _truthIsCurrent = true;
+        _launchedPlan = plan;
         MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = false;
         if (RememberCheck.IsChecked == true) SavePlaybackDefaults();
         try
         {
+            // The picture is in the player window; a disabled Play here would only be noise.
+            PlayButton.Visibility = Visibility.Collapsed;
+            StatusText.Margin = new Thickness(0);
+            HeroEyebrow.Text = "Now playing";
             StatusText.Text = "Playing — close the player to return";
             RuntimeText.Text = "Starting the reviewed playback plan…";
-            TruthExpander.Visibility = Visibility.Visible;
-            TruthText.Text = "Waiting for the player to report.";
+            AttentionCard.Visibility = Visibility.Collapsed;
             _truthRefresh.Start();
+            RefreshPlaybackState();
             int exitCode = await _backend.Playback.LaunchAsync(plan);
             StatusText.Text = exitCode == 0 ? "Playback ended — ready to play again" : $"Playback ended with an error ({exitCode})";
-            RuntimeText.Text = _backend.Playback.LastReport?.Summary ?? "Playback ended.";
-            RefreshTruth();
+            RuntimeText.Text = _backend.Playback.LastReport?.Summary is { } report
+                ? PlaybackPresentation.ActivityText(report, plan.Summary) : "Playback ended.";
         }
         catch (Exception ex)
         {
@@ -281,6 +361,10 @@ public partial class MainWindow : Window
             if (_closeAfterPlayback) Close();
             if (!_closed)
             {
+                HeroEyebrow.Text = "Ready to play";
+                PlayButton.Visibility = Visibility.Visible;
+                StatusText.Margin = new Thickness(18, 0, 0, 0);
+                RefreshPlaybackState();
                 MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = true;
                 Show();
                 WindowState = WindowState.Normal;
@@ -288,6 +372,181 @@ public partial class MainWindow : Window
             }
         }
     }
+
+    /// <summary>Quiet while healthy: the attention card appears only when the player
+    /// reports a condition that persists or fails, and it names that condition.</summary>
+    private void RefreshPlaybackState()
+    {
+        var health = _truthIsCurrent ? _backend.Playback.LastPlaybackHealth : null;
+        if (health is not null && PlaybackPresentation.NeedsAttention(health.State))
+        {
+            string explanation = health.Explanation.Trim();
+            AttentionText.Text = HealthText.Describe(health.State) + (explanation.Length == 0 ? "." : ". " + explanation);
+            AttentionCard.Visibility = Visibility.Visible;
+        }
+        else AttentionCard.Visibility = Visibility.Collapsed;
+        if (DetailsDrawer.Visibility == Visibility.Visible) RenderDetails();
+    }
+
+    // ---- Playback details drawer -------------------------------------------------
+
+    private void DetailsToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        bool open = DetailsToggle.IsChecked == true;
+        DetailsDrawer.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        UpdatePageLayout();
+        if (!open) return;
+        RenderDetails();
+        // Feline signature (the second of two): the panel arrives with a brief tail-like
+        // settle rather than a flat slide. Skipped when Windows animation effects are off.
+        if (!SystemParameters.ClientAreaAnimation) return;
+        var slide = new TranslateTransform(28, 0);
+        DetailsDrawer.RenderTransform = slide;
+        var settle = new System.Windows.Media.Animation.BackEase { Amplitude = 0.35, EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut };
+        slide.BeginAnimation(TranslateTransform.XProperty, new System.Windows.Media.Animation.DoubleAnimation(28, 0, TimeSpan.FromMilliseconds(260)) { EasingFunction = settle });
+        DetailsDrawer.BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
+    }
+
+    private void InspectDetails_Click(object sender, RoutedEventArgs e) => DetailsToggle.IsChecked = true;
+
+    private void CloseDetails_Click(object sender, RoutedEventArgs e)
+    {
+        DetailsToggle.IsChecked = false;
+        DetailsToggle.Focus();
+    }
+
+    /// <summary>Rebuilds the details from the structured truth chain when this media
+    /// has played, otherwise from the prepared plan. Nothing is shown as observed
+    /// until the player has reported it.</summary>
+    private void RenderDetails()
+    {
+        DetailsHost.Children.Clear();
+        if ((_truthIsCurrent ? _backend.Playback.CurrentTruth() : null) is { } truth)
+        {
+            DetailsSubtitle.Text = _playing
+                ? "Live from the player, refreshed every two seconds."
+                : "From the last playback of this media.";
+            foreach (var section in truth.Sections)
+            {
+                AddCaps(section.Title.ToUpperInvariant());
+                var rows = PlaybackPresentation.Rows(section, truth.Delivery);
+                for (int i = 0; i < rows.Count; i++)
+                    AddTruthRow(rows[i], first: i == 0, health: ReferenceEquals(section, truth.Health) && i == 0);
+            }
+            if (truth.History.Count > 0)
+            {
+                AddCaps("EARLIER ATTEMPTS");
+                foreach (var attempt in truth.History)
+                {
+                    AddTruthRow(new(attempt.Title), first: false, health: false, strong: true);
+                    foreach (string line in attempt.Lines) AddTruthRow(new(line), first: true, health: false);
+                }
+            }
+            return;
+        }
+        if (_preparedPlan is { } plan)
+        {
+            DetailsSubtitle.Text = "Before playback: the source and the plan. Observed values appear once the player reports them.";
+            AddCaps("SOURCE");
+            bool first = true;
+            foreach (var fact in PlaybackPresentation.SourceFacts(plan.Source)) { AddFact(fact, first); first = false; }
+            AddCaps("PLAN");
+            var (_, lines) = PlaybackPresentation.SplitSummary(plan.Summary);
+            for (int i = 0; i < lines.Count; i++) AddTruthRow(new(lines[i]), first: i == 0, health: false);
+            AddCaps("OBSERVED");
+            AddTruthRow(new("Nothing observed yet: playback has not started."), first: true, health: false, muted: true);
+            return;
+        }
+        DetailsSubtitle.Text = _pendingItems.Length == 0
+            ? "Choose media to see its source and playback plan."
+            : "Preparing the plan…";
+    }
+
+    private Brush Res(string key) => (Brush)FindResource(key);
+
+    private void AddCaps(string text) => DetailsHost.Children.Add(new TextBlock
+    {
+        Text = text, Style = (Style)FindResource("Dm.Caps"), Margin = new Thickness(0, 24, 0, 6),
+    });
+
+    private void AddFact(SourceFact fact, bool first)
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.Children.Add(new TextBlock { Text = fact.Label, FontSize = 12, Foreground = Res("Dm.TextSecondary"), Margin = new Thickness(0, 0, 16, 0) });
+        var value = new TextBlock
+        {
+            Text = fact.Value, FontSize = fact.Machine ? 11.5 : 12, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Right,
+            Foreground = Res("Dm.Text"), FontFamily = (FontFamily)FindResource(fact.Machine ? "Dm.FontMono" : "Dm.FontUi"),
+        };
+        Grid.SetColumn(value, 1);
+        grid.Children.Add(value);
+        DetailsHost.Children.Add(Row(grid, first));
+    }
+
+    private void AddTruthRow(TruthRow row, bool first, bool health, bool strong = false, bool muted = false)
+    {
+        var label = new TextBlock
+        {
+            Text = row.Text, FontSize = 12, TextWrapping = TextWrapping.Wrap, LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
+            LineHeight = 18, Foreground = Res(muted ? "Dm.TextMuted" : "Dm.Text"),
+            FontWeight = strong ? FontWeights.SemiBold : FontWeights.Normal,
+        };
+        if (health)
+        {
+            // Health speaks only when it has something to say: healthy is a quiet
+            // semantic green, anything needing attention is warm.
+            var state = _backend.Playback.LastPlaybackHealth?.State;
+            if (state is SustainedPlaybackHealth.Healthy) label.Foreground = Res("Dm.HealthyText");
+            else if (state is { } s && PlaybackPresentation.NeedsAttention(s)) label.Foreground = Res("Dm.AttentionTitle");
+        }
+        if (row.State is not { } verdict)
+        {
+            DetailsHost.Children.Add(Row(label, first));
+            return;
+        }
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        grid.Children.Add(label);
+        var (surface, ink) = verdict switch
+        {
+            DeliveryState.Verified => ("Dm.HealthySurface", "Dm.HealthyText"),
+            DeliveryState.FellBack => ("Dm.AttentionSurface", "Dm.AttentionTitle"),
+            DeliveryState.Unverified => ("Dm.Pill", "Dm.Text"),
+            _ => ("Dm.Pill", "Dm.TextSecondary"),
+        };
+        var pill = new Border
+        {
+            Style = (Style)FindResource("Dm.PillBox"), Background = Res(surface), Margin = new Thickness(12, 0, 0, 0),
+            Child = new TextBlock { Text = PlaybackPresentation.StateLabel(verdict), FontSize = 10.5, FontWeight = FontWeights.SemiBold, Foreground = Res(ink) },
+        };
+        Grid.SetColumn(pill, 1);
+        grid.Children.Add(pill);
+        if (row.Evidence.Length > 0)
+        {
+            var evidence = new TextBlock
+            {
+                Text = row.Evidence, Style = (Style)FindResource("Dm.Meta"), Margin = new Thickness(0, 4, 0, 0),
+                LineStackingStrategy = LineStackingStrategy.BlockLineHeight, LineHeight = 16,
+            };
+            Grid.SetRow(evidence, 1);
+            Grid.SetColumnSpan(evidence, 2);
+            grid.Children.Add(evidence);
+        }
+        DetailsHost.Children.Add(Row(grid, first));
+    }
+
+    private Border Row(UIElement content, bool first) => new()
+    {
+        BorderBrush = Res("Dm.Separator"), BorderThickness = new Thickness(0, first ? 0 : 1, 0, 0),
+        Padding = new Thickness(0, 8, 0, 8), Child = content,
+    };
+
+    // ---- Opening media --------------------------------------------------------------
 
     private async void OpenFiles_Click(object sender, RoutedEventArgs e)
     {
@@ -326,31 +585,53 @@ public partial class MainWindow : Window
         }
     }
 
+    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && DetailsDrawer.Visibility == Visibility.Visible)
+        {
+            e.Handled = true;
+            CloseDetails_Click(sender, e);
+            return;
+        }
+        if (Keyboard.Modifiers != ModifierKeys.Control || _playing) return;
+        if (e.Key == Key.O) { e.Handled = true; OpenFiles_Click(sender, e); }
+        else if (e.Key == Key.U) { e.Handled = true; OpenUrl_Click(sender, e); }
+    }
+
     private void Diagnostics_Click(object sender, RoutedEventArgs e) => _backend.OpenDiagnostics();
     private void CopyDiagnostics_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             string path = System.IO.Path.Combine(DiagnosticsStore.DirectoryPath, "latest.json");
-            if (System.IO.File.Exists(path)) { Clipboard.SetText(System.IO.File.ReadAllText(path)); StatusText.Text = "Diagnostics copied"; }
-            else StatusText.Text = "Play a file first to collect diagnostics";
+            if (System.IO.File.Exists(path)) { Clipboard.SetText(System.IO.File.ReadAllText(path)); DiagnosticsStatusText.Text = "Diagnostics copied"; }
+            else DiagnosticsStatusText.Text = "Play a file first to collect diagnostics";
         }
-        catch (Exception ex) { StatusText.Text = "Could not copy diagnostics: " + ex.Message; }
+        catch (Exception ex) { DiagnosticsStatusText.Text = "Could not copy diagnostics: " + ex.Message; }
+    }
+
+    // ---- Drag and drop ---------------------------------------------------------------
+
+    private void SetDropActive(bool active)
+    {
+        DropSurface.Background = Res(active ? "Dm.SurfaceDropActive" : "Dm.SurfaceDrop");
+        DropOutline.Stroke = active ? Res("Dm.BorderSelected") : Brushes.Transparent;
+        DropTitle.Text = active ? "Release to open" : "Drop a video here";
     }
 
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         e.Effects = !_playing && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        SetDropActive(e.Effects == DragDropEffects.Copy);
         e.Handled = true;
     }
 
+    private void Window_DragLeave(object sender, DragEventArgs e) => SetDropActive(false);
+
     private async void Window_Drop(object sender, DragEventArgs e)
     {
+        SetDropActive(false);
         if (!_playing && e.Data.GetData(DataFormats.FileDrop) is string[] paths && paths.Length > 0)
             await SelectMediaAsync(paths);
     }
 }
-
-
-
-

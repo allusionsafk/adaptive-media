@@ -9,7 +9,11 @@ public partial class UrlDialog : Window
     public string MediaUrl { get; private set; } = "";
     public string? YtdlFormat { get; private set; }
 
-    public UrlDialog() => InitializeComponent();
+    public UrlDialog()
+    {
+        InitializeComponent();
+        WindowTheme.UseDarkFrame(this);
+    }
 
     private void Play_Click(object sender, RoutedEventArgs e)
     {
@@ -17,7 +21,7 @@ public partial class UrlDialog : Window
             !(uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
               uri.Scheme.Equals("rtsp", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("rtmp", StringComparison.OrdinalIgnoreCase)))
         {
-            MessageBox.Show(this, "Enter a valid network media URL.", "Adaptive Media", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "Enter a valid network media URL.", "DemiMedia", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 

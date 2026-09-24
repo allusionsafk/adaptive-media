@@ -19,7 +19,7 @@ internal static class Program
         {
             Console.Error.WriteLine(ex.ToString());
             DiagnosticsStore.Event("error", "startup", ex.GetType().Name);
-            if (!args.Any(x => x.EndsWith("-stdin") || x.EndsWith("test"))) System.Windows.MessageBox.Show(ex.Message, "Adaptive Media");
+            if (!args.Any(x => x.EndsWith("-stdin") || x.EndsWith("test"))) System.Windows.MessageBox.Show(ex.Message, "DemiMedia");
             return 29;
         }
     }
