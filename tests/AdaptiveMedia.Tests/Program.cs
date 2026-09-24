@@ -125,7 +125,9 @@ int truthAssertions = PlaybackTruthTests.Run(Check);
 int enhancementAssertions = EnhancementPlannerTests.Run(Check);
 int deliveryAssertions = EnhancementDeliveryTests.Run(Check);
 int samplerAssertions = await PlaybackHealthMonitorTests.RunAsync(Check);
-Console.WriteLine($"PASS: {assertions} assertions ({enhancementAssertions} enhancement planner, {deliveryAssertions} enhancement delivery, {healthAssertions} sustained playback health, {recoveryAssertions} automatic recovery, {truthAssertions} playback truth, {samplerAssertions} health sampler)");
+int detailsAssertions = PlayerDetailsPayloadTests.Run(Check);
+int presentationAssertions = PlaybackPresentationTests.Run(Check);
+Console.WriteLine($"PASS: {assertions} assertions ({enhancementAssertions} enhancement planner, {deliveryAssertions} enhancement delivery, {healthAssertions} sustained playback health, {recoveryAssertions} automatic recovery, {truthAssertions} playback truth, {samplerAssertions} health sampler, {detailsAssertions} player details, {presentationAssertions} launcher presentation)");
 return 0;
 }
 catch (Exception ex)

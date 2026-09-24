@@ -11,5 +11,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackTruth.cs" Link="PlaybackTruth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementDelivery.cs" Link="EnhancementDelivery.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealthMonitor.cs" Link="PlaybackHealthMonitor.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlayerDetailsPayload.cs" Link="PlayerDetailsPayload.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackPresentation.cs" Link="PlaybackPresentation.cs" />
   </ItemGroup>
 </Project>

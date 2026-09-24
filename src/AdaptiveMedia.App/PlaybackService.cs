@@ -881,9 +881,17 @@ public sealed class PlaybackService
             // reporting is removed rather than left over from an earlier poll, so a
             // later source (an audio-only playlist item, say) cannot inherit it.
             var observed = new Dictionary<string, JsonElement>();
+#if WINDOWS
+            string? details = null;
+#endif
             while (!cancellation.IsCancellationRequested)
             {
                 using var queryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation); queryTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+#if WINDOWS
+                // The in-player details panel gets this playback's plan and truth lines
+                // as soon as the player answers, then again only when they change.
+                details = await PushPlayerDetailsAsync(ipc, plan, details, queryTimeout.Token);
+#endif
                 foreach (string name in new[] { "mpv-version", "gpu-api", "gpu-context", "hwdec-current", "vf", "video-codec", "video-params", "video-out-params", "osd-dimensions",
                     "display-fps", "estimated-display-fps", "vsync-jitter", "frame-drop-count", "decoder-frame-drop-count", "vo-delayed-frame-count", "video-sync",
                     "interpolation", "audio-out-params", "current-ao", "current-vo", "video-target-params", "user-data/adaptive/state",
@@ -998,6 +1006,34 @@ public sealed class PlaybackService
             }
         }
     }
+
+#if WINDOWS
+    /// <summary>Give the in-player details panel (payload/mpv-config/scripts/
+    /// demimedia_details.lua) this playback's plan and truth lines, only when they
+    /// differ from what was last sent. Display only: nothing reads the value back
+    /// as evidence, and a failure here never ends observation; cancellation still
+    /// does. App-only: the net10.0 test projects that link this file build without
+    /// the WINDOWS symbol, so they neither push nor need the payload builder.</summary>
+    private async Task<string?> PushPlayerDetailsAsync(MpvIpc ipc, PlaybackPlan plan, string? sent, CancellationToken token)
+    {
+        // The native lane runs with --no-config and loads no panel.
+        if (_nativeAttempts.ContainsKey(plan.PipeName)) return sent;
+        try
+        {
+            var payload = PlayerDetailsPayloadBuilder.Build(plan, CurrentTruth());
+            string json = payload.ToJson();
+            if (json == sent) return sent;
+            // Sent once per change whatever the reply, so a player that refuses it
+            // is not asked again every second.
+            await ipc.CommandAsync(["set_property", PlayerDetailsPayload.Property, payload], token);
+            return json;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return sent;
+        }
+    }
+#endif
 
     private static NativeCompositionFacts CompositionFacts(NativeDvObservation o) => new(
         o.Renderer == DvObservedState.Active, o.DecoderInstances, o.BlElPairing == DvObservedState.Active,
