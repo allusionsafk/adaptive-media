@@ -15,7 +15,8 @@ public partial class SettingsWindow : Window
         ExternalCheck.IsChecked = settings.PreferExternalDisplay;
         FullscreenCheck.IsChecked = settings.FullscreenExternal;
         BitstreamCheck.IsChecked = settings.HdmiBitstream;
-        MpcCheck.IsChecked = settings.MpcFallback;
+        MpcCheck.IsChecked = false;
+        MpcCheck.IsEnabled = false;
         NativeDvCheck.IsChecked = settings.NativeDolbyVisionLane;
         NativeDvDownloadCheck.IsChecked = settings.AllowNativeDolbyVisionDownload;
     }
@@ -26,7 +27,7 @@ public partial class SettingsWindow : Window
         ResultSettings.PreferExternalDisplay = ExternalCheck.IsChecked == true;
         ResultSettings.FullscreenExternal = FullscreenCheck.IsChecked == true;
         ResultSettings.HdmiBitstream = BitstreamCheck.IsChecked == true;
-        ResultSettings.MpcFallback = MpcCheck.IsChecked == true;
+        ResultSettings.MpcFallback = false;
         ResultSettings.NativeDolbyVisionLane = NativeDvCheck.IsChecked == true;
         ResultSettings.AllowNativeDolbyVisionDownload = NativeDvDownloadCheck.IsChecked == true;
         DialogResult = true;

@@ -40,16 +40,17 @@ public static class MediaProbe
     {
         if (!File.Exists(item)) return new(); // URLs are observed during playback; never prefetch credentials.
         item = Path.GetFullPath(item);
-        const string marker = "AMPROBE|${width}|${height}|${container-fps}|${video-format}|${video-params/gamma}|${video-params/primaries}|${audio-codec-name}|${video-params/pixelformat}|${video-params/aspect}";
+        const string marker = "AMPROBE|${width}|${height}|${container-fps}|${video-format}|${video-params/gamma}|${video-params/primaries}|${audio-codec-name}|${video-params/pixelformat}|${video-params/aspect}|${duration}";
         var result = await NativeProcess.CaptureAsync(mpv,
             ["--no-config", "--load-scripts=no", "--frames=1", "--vo=null", "--ao=null", "--terminal=yes", "--quiet", "--term-playing-msg=" + marker, "--", item], TimeSpan.FromSeconds(20));
         string? line = result.Output.Split('\n').LastOrDefault(x => x.StartsWith("AMPROBE|", StringComparison.Ordinal));
         if (result.ExitCode != 0 || line is null) return new();
         string[] p = line.Trim().Split('|');
-        if (p.Length != 10) return new();
+        if (p.Length != 11) return new();
         int.TryParse(p[1], out int width); int.TryParse(p[2], out int height);
         double.TryParse(p[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double fps);
         double.TryParse(p[9], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double aspect);
-        return new(width, height, fps, p[4], p[5], p[6], p[7], p[8], aspect);
+        double.TryParse(p[10], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double duration);
+        return new(width, height, fps, p[4], p[5], p[6], p[7], p[8], aspect, duration);
     }
 }

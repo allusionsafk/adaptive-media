@@ -337,6 +337,8 @@ try
     // ---------------------------------------------------------------------
     var laneStore = new NativeDvRuntimeStore(Path.Combine(testRoot, "lane"), Fetch(archiveBytes), Extract());
     var lane = new NativeDvLane(laneStore, descriptor);
+    Check(new PlaybackService().NativeDolbyVision is not null,
+        "the ordinary playback service has the qualified native DV lane available for an opt-in request");
     var off = await lane.PrepareAsync("nonexistent.mkv", new AppSettings { NativeDolbyVisionLane = false },
         "config", "pipe", null, null);
     Check(!off.Selected && off.Plan is null, "The native lane is never selected implicitly");
@@ -1495,6 +1497,15 @@ if (!string.IsNullOrWhiteSpace(realSource) && File.Exists(realSource))
         Check(!Directory.EnumerateFiles(healthyRoot, "*.mkv", SearchOption.AllDirectories).Any() &&
               !Directory.EnumerateFiles(healthyRoot, "*.hevc", SearchOption.AllDirectories).Any(),
             "HEALTHY: playback extracts and converts nothing");
+
+        var disabledPlan = await healthyService.PrepareAsync([realSource],
+            new PlaybackOptions("Reference", "Off", "Off", false, false),
+            new SystemSummary { MpvPath = @"C:\mpv\mpv.exe" },
+            new AppSettings { NativeDolbyVisionLane = false, AllowNativeDolbyVisionDownload = true },
+            new PlaybackTarget(1280, 720));
+        Check(!disabledPlan.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal) &&
+              healthyService.LastNativeOutcome is null,
+            "HEALTHY: disabling the native setting prevents selection and clears the previous native result");
 
         var healthyStableAfter = File.Exists(@"C:\mpv\mpv.exe")
             ? (Length: new FileInfo(@"C:\mpv\mpv.exe").Length, Hash: NativeDvRuntimeStore.ComputeSha256(@"C:\mpv\mpv.exe"))

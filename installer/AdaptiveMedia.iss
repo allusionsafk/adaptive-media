@@ -35,7 +35,7 @@ VersionInfoProductVersion=0.4.0.0
 [Tasks]
 Name: "deps"; Description: "Install or repair MPV (recommended)"; GroupDescription: "Playback components:"; Flags: checkedonce
 Name: "ytdlp"; Description: "Install yt-dlp for URL/stream playback"; GroupDescription: "Playback components:"; Flags: checkedonce
-Name: "mpcbe"; Description: "Install MPC-BE as a compatibility fallback"; GroupDescription: "Playback components:"; Flags: checkedonce
+Name: "mpcbe"; Description: "Install MPC-BE separately (automatic DemiMedia fallback unavailable)"; GroupDescription: "Playback components:"; Flags: checkedonce
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Windows integration:"; Flags: checkedonce
 Name: "startmenu"; Description: "Create Start Menu shortcut"; GroupDescription: "Windows integration:"; Flags: checkedonce
 Name: "contextmenu"; Description: "Add Play with Adaptive Media to video/folder context menus"; GroupDescription: "Windows integration:"; Flags: checkedonce

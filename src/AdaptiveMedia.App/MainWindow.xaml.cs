@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private string[] _pendingItems = [];
     private string? _pendingFormat;
     private PlaybackPlan? _preparedPlan;
+    private WatchLaterOffer? _resumeOffer;
     private PlaybackOptions? _preparedOptions;
     private string? _preparedSourceStamp;
     private bool _displayChanged;
@@ -67,7 +68,7 @@ public partial class MainWindow : Window
         if (_startupItems.Length > 0 && !_closed)
         {
             await SelectMediaAsync(_startupItems);
-            if (_pendingItems.SequenceEqual(_startupItems)) await PlayPreparedAsync();
+            if (_pendingItems.SequenceEqual(_startupItems) && _resumeOffer is null) await PlayPreparedAsync(false);
         }
     }
 
@@ -275,6 +276,10 @@ public partial class MainWindow : Window
         long generation = ++_generation;
         _preparedPlan = null;
         _preparedOptions = null;
+        _resumeOffer = null;
+        StartBeginningButton.Visibility = Visibility.Collapsed;
+        PlayButton.Content = "_Play";
+        System.Windows.Automation.AutomationProperties.SetName(PlayButton, "Play");
         PlayButton.IsEnabled = false;
         if (_pendingItems.Length == 0 || _closed) { _previewCancellation = null; cancellation.Dispose(); return; }
         string[] items = _pendingItems.ToArray();
@@ -298,11 +303,14 @@ public partial class MainWindow : Window
             _preparedPlan = plan;
             _preparedOptions = options;
             _preparedSourceStamp = SourceStamp(plan);
+            UpdateResumeOffer(plan);
             _displayChanged = false;
             var (source, planLines) = PlaybackPresentation.SplitSummary(plan.Summary);
             HeroBody.Text = PlaybackPresentation.SourceLine(plan.Source, source);
             PlanText.Text = planLines.Count > 0 ? string.Join("\n", planLines) : plan.Summary;
-            StatusText.Text = "Plan ready — review your choices, then Play";
+            StatusText.Text = _resumeOffer is { } offer
+                ? "Saved near " + PlaybackRecoveryText.Position(offer.PositionSeconds) + " — choose where to start"
+                : "Plan ready — review your choices, then Play";
             PlayButton.IsEnabled = !_playing;
             if (DetailsDrawer.Visibility == Visibility.Visible) RenderDetails();
         }
@@ -321,16 +329,35 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void Play_Click(object sender, RoutedEventArgs e) => await PlayPreparedAsync();
+    private void UpdateResumeOffer(PlaybackPlan plan)
+    {
+        string owned = WatchLaterResume.OwnedDirectory(SettingsStore.DirectoryPath);
+        string stableExecutable = plan.Executable;
+        if (plan.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal))
+            try { stableExecutable = PlaybackService.ResolveMpv(); }
+            catch (FileNotFoundException) { }
+        _resumeOffer = WatchLaterResume.Find(plan, owned, WatchLaterResume.LegacyDirectory(stableExecutable));
+        StartBeginningButton.Visibility = _resumeOffer is null ? Visibility.Collapsed : Visibility.Visible;
+        PlayButton.Content = _resumeOffer is null ? "_Play" : "_Resume";
+        System.Windows.Automation.AutomationProperties.SetName(PlayButton, _resumeOffer is null ? "Play" : "Resume");
+    }
 
-    private async Task PlayPreparedAsync()
+    private async void Play_Click(object sender, RoutedEventArgs e) => await PlayPreparedAsync(_resumeOffer is not null);
+    private async void StartBeginning_Click(object sender, RoutedEventArgs e) => await PlayPreparedAsync(false);
+
+    private async Task PlayPreparedAsync(bool resume)
     {
         if (_playing || _closed || _preparedPlan is not { } plan) return;
         if (_preparedOptions != CurrentOptions() || _displayChanged || _preparedSourceStamp != SourceStamp(plan)) { await RefreshPreviewAsync(); return; }
+        var expectedOffer = _resumeOffer;
+        UpdateResumeOffer(plan);
+        if (expectedOffer != _resumeOffer) { await RefreshPreviewAsync(); return; }
+        plan = WatchLaterResume.ApplyChoice(plan, _resumeOffer, resume,
+            WatchLaterResume.OwnedDirectory(SettingsStore.DirectoryPath));
         _playing = true;
         _truthIsCurrent = true;
         _launchedPlan = plan;
-        MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = false;
+        MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = StartBeginningButton.IsEnabled = false;
         if (RememberCheck.IsChecked == true) SavePlaybackDefaults();
         try
         {
@@ -365,7 +392,13 @@ public partial class MainWindow : Window
                 PlayButton.Visibility = Visibility.Visible;
                 StatusText.Margin = new Thickness(18, 0, 0, 0);
                 RefreshPlaybackState();
-                MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = true;
+                if (_preparedPlan is { } prepared)
+                {
+                    UpdateResumeOffer(prepared);
+                    if (_resumeOffer is { } saved)
+                        StatusText.Text = "Saved near " + PlaybackRecoveryText.Position(saved.PositionSeconds) + " — choose where to start";
+                }
+                MediaActions.IsEnabled = PlaybackChoices.IsEnabled = SettingsButton.IsEnabled = PlayButton.IsEnabled = StartBeginningButton.IsEnabled = true;
                 Show();
                 WindowState = WindowState.Normal;
                 Activate();

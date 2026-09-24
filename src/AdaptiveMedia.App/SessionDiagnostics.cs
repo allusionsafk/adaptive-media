@@ -49,9 +49,11 @@ public static class DiagnosticsStore
             { p.Decision.Detail, p.Decision.Motion, p.Decision.Cleanup, p.Decision.Cadence, p.Decision.Scale, p.Decision.Reasons },
             p.Requested.Profile, p.Requested.UpscaleMode, p.Requested.MotionMode,
             p.Requested.Cleanup, p.Requested.CleanupMode, p.Requested.RtxHdr, p.Source, p.Target, p.Renderer, p.RtxSrConstructed,
-            p.RtxHdrConstructed, p.Scale, p.Reasons, p.ArgumentVectorSha256,
+            p.RtxHdrConstructed, p.Scale, p.BitstreamRequested, p.BitstreamPlanned,
+            p.UserResumeAt, p.RecoveryResumeAt, p.Reasons, p.ArgumentVectorSha256,
             Arguments = p.Arguments.TakeWhile(x => x != "--").Select(x => x.StartsWith("--config-dir=") ? "--config-dir=[managed]" :
                 x.StartsWith("--script=") ? "--script=[managed runtime]" : x.StartsWith("--input-ipc-server=") ? "--input-ipc-server=[session]" :
+                x.StartsWith("--watch-later-dir=") ? "--watch-later-dir=[managed state]" :
                 x.StartsWith("--ytdl-format=") ? "--ytdl-format=[selected]" : x) } : null;
         string text = Redact(JsonSerializer.Serialize(new { report.Version, report.Windows, report.Started, report.Source,
             report.Hardware, Plan = ShareablePlan(report.Plan), Attempts = report.Attempts.Select(ShareablePlan), report.MpvVersion, report.RtxDriverActiveVerified, report.Observed,

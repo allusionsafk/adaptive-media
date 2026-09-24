@@ -183,7 +183,7 @@ public static class PlaybackTruthBuilder
     {
         var o = attempt.Plan.Requested;
         var lines = new List<string>();
-        if (attempt.NativeFelRequested) lines.Add("Native Dolby Vision · full enhancement layer (FEL)");
+        if (attempt.NativeFelRequested) lines.Add("Native Dolby Vision Profile 7 · enhancement-layer composition requested");
         lines.Add(attempt.Plan.Decision?.Detail switch
         {
             DetailImplementation.NvidiaVpp => "RTX Super Resolution",
@@ -216,6 +216,9 @@ public static class PlaybackTruthBuilder
             _ => o.CleanupMode == "Legacy" ? (o.Cleanup ? "Normal" : "Off") : o.CleanupMode,
         };
         if (cleanup != "Off") lines.Add("Banding reduction: " + cleanup);
+        if (attempt.Plan.BitstreamRequested) lines.Add("Compressed audio passthrough");
+        if (attempt.Plan.UserResumeAt is double requestedAt)
+            lines.Add("User resume near " + PlaybackRecoveryText.Position(requestedAt));
         lines.Add("Preset: " + o.Profile);
         return lines;
     }
@@ -234,7 +237,7 @@ public static class PlaybackTruthBuilder
         {
             lines.Add("Native Dolby Vision Profile 7 · verified runtime" + (attempt.NativeRuntimeVersion is { } v ? " " + v : "") +
                 (attempt.Kind == PlaybackAttemptKind.NativePrevious ? " (previous)" : ""));
-            if (attempt.NativeFelRequested) lines.Add("Full enhancement-layer composition requested of the runtime");
+            if (attempt.NativeFelRequested) lines.Add("Enhancement-layer composition requested of the runtime; FEL contribution awaits observation");
         }
         string? hwdec = Argument(plan, "--hwdec");
         lines.Add(hwdec switch
@@ -263,8 +266,12 @@ public static class PlaybackTruthBuilder
                     ? "Temporal blend smoothing (display-resample)"
                     : (Argument(plan, "--tscale") == "oversample" ? "Gentle" : "Smooth") + " motion (display-resample)");
         if (Argument(plan, "--deband") == "yes") lines.Add("Banding reduction (deband)");
-        if (Argument(plan, "--start") is { } start && double.TryParse(start, NumberStyles.Float, CultureInfo.InvariantCulture, out double at))
-            lines.Add("Start near " + PlaybackRecoveryText.Position(at));
+        if (plan.BitstreamPlanned) lines.Add("Compressed audio passthrough for supported source codecs; endpoint unverified");
+        else if (plan.BitstreamRequested) lines.Add("PCM audio; compressed passthrough unavailable on this runtime");
+        if (plan.RecoveryResumeAt is double recoveryAt)
+            lines.Add("Automatic recovery resume near " + PlaybackRecoveryText.Position(recoveryAt));
+        else if (plan.UserResumeAt is double userAt)
+            lines.Add("User resume near " + PlaybackRecoveryText.Position(userAt));
         return lines;
     }
 
@@ -333,6 +340,15 @@ public static class PlaybackTruthBuilder
             lines.Add(gamma.GetString() is "pq" or "hlg" ? "HDR output (" + gamma.GetString()!.ToUpperInvariant() + ")" : "SDR output");
         if (observed.TryGetValue("estimated-display-fps", out var fps) && fps.ValueKind == JsonValueKind.Number && fps.GetDouble() > 0)
             lines.Add($"Display ~{fps.GetDouble():0} Hz");
+        if (observed.TryGetValue("audio-out-params", out var audio) && audio.ValueKind == JsonValueKind.Object &&
+            audio.TryGetProperty("format", out var format) && format.ValueKind == JsonValueKind.String)
+        {
+            string? value = format.GetString();
+            if (value is not null && value.StartsWith("spdif-", StringComparison.OrdinalIgnoreCase))
+                lines.Add("Compressed audio output reported by player (" + value + "); HDMI transport and Atmos unverified");
+            else if (!string.IsNullOrWhiteSpace(value))
+                lines.Add("Decoded audio output reported by player (" + value + ")");
+        }
         if (lines.Count == 0) lines.Add("Nothing observed yet");
         return lines;
     }

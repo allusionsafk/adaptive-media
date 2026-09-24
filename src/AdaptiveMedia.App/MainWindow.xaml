@@ -65,6 +65,9 @@
                             <StackPanel x:Name="PlayRow" Orientation="Horizontal" Margin="0,32,0,0" Visibility="Collapsed">
                                 <Button x:Name="PlayButton" Content="_Play" Style="{StaticResource Dm.PlayButton}" Click="Play_Click" IsEnabled="False"
                                         AutomationProperties.Name="Play" AutomationProperties.HelpText="Start the playback plan shown below"/>
+                                <Button x:Name="StartBeginningButton" Content="Start from _beginning" Style="{StaticResource Dm.GhostButton}"
+                                        Click="StartBeginning_Click" Visibility="Collapsed" Margin="10,0,0,0"
+                                        AutomationProperties.Name="Start from beginning"/>
                                 <TextBlock x:Name="StatusText" Text="Ready" Style="{StaticResource Dm.Body}" Margin="18,0,0,0" VerticalAlignment="Center"
                                            MaxWidth="440" AutomationProperties.LiveSetting="Polite"/>
                             </StackPanel>

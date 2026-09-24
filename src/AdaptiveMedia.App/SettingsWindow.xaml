@@ -25,19 +25,21 @@
 
             <TextBlock Text="AUDIO" Style="{StaticResource Dm.Caps}" Margin="0,24,0,4"/>
             <CheckBox x:Name="BitstreamCheck" Margin="0,10,0,4">
-                <TextBlock Text="Enable HDMI bitstream for AC-3 / E-AC-3 / TrueHD / DTS-HD when HDMI is active" TextWrapping="Wrap"/>
+                <TextBlock Text="Request AC-3 / E-AC-3 / TrueHD / DTS-HD passthrough for a receiver selected in Windows" TextWrapping="Wrap"/>
             </CheckBox>
-            <TextBlock Text="Leave bitstream off for laptop speakers, ordinary TV speakers, Bluetooth, USB audio, or Dolby Atmos for Headphones."
+            <TextBlock Text="DemiMedia cannot verify the HDMI path, receiver capability, or Atmos delivery. Leave this off for laptop speakers, ordinary TV speakers, Bluetooth, USB audio, or Dolby Atmos for Headphones."
                        Style="{StaticResource Dm.Meta}" FontSize="12" Margin="30,0,0,6"/>
 
             <TextBlock Text="FALLBACK" Style="{StaticResource Dm.Caps}" Margin="0,24,0,4"/>
             <CheckBox x:Name="MpcCheck" Margin="0,10">
-                <TextBlock Text="Offer MPC-BE if MPV reports a playback failure" TextWrapping="Wrap"/>
+                <TextBlock Text="MPC-BE fallback unavailable in this build" TextWrapping="Wrap"/>
             </CheckBox>
+            <TextBlock Text="DemiMedia cannot verify and launch MPC-BE safely yet. Playback failures stay in DemiMedia's diagnostics."
+                       Style="{StaticResource Dm.Meta}" FontSize="12" Margin="30,0,0,6" TextWrapping="Wrap"/>
 
             <TextBlock Text="EXPERIMENTAL" Style="{StaticResource Dm.Caps}" Margin="0,24,0,4"/>
             <CheckBox x:Name="NativeDvCheck" Margin="0,10,0,4">
-                <TextBlock Text="Play Dolby Vision Profile 7 natively, with its enhancement layer" TextWrapping="Wrap"/>
+                <TextBlock Text="Request native Dolby Vision Profile 7 enhancement-layer composition" TextWrapping="Wrap"/>
             </CheckBox>
             <TextBlock Text="Uses a separate player runtime that DemiMedia installs and verifies on its own, alongside your normal player. Ordinary playback is unaffected. Whether the enhancement layer is actually composed is reported after playback starts; it is never assumed."
                        Style="{StaticResource Dm.Meta}" FontSize="12" LineStackingStrategy="BlockLineHeight" LineHeight="18" Margin="30,0,0,8"/>
