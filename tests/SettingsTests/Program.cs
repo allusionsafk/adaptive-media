@@ -69,6 +69,11 @@ try {
     Check(canonical.AutomaticGoal=="BalancedImprovement" && canonical.EnhancedDetail=="Balanced" &&
           canonical.EnhancedMotion=="Original" && canonical.EnhancedCleanup=="Balanced",
         "newly saved settings retain safe semantic defaults");
+    Write("{\"EnhancedFit\":\"SmartFill\"}");
+    Check(SettingsStore.Load().EnhancedFit=="SmartFill", "Smart Fill choice persists");
+    Write("{\"EnhancedFit\":\"InventedPixels\"}");
+    Check(SettingsStore.Load().EnhancedFit=="Original" && SettingsStore.LastWarning?.Contains("EnhancedFit")==true,
+        "unsupported fit choice falls back to original framing");
     // MPC-BE has no qualified launch path in this build. A saved legacy opt-in
     // must not remain an apparently active setting after loading or saving.
     Write("{\"MpcFallback\":true}");

@@ -176,6 +176,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock Text="Detail" Style="{StaticResource Dm.Label}" VerticalAlignment="Center" Margin="0,0,0,22"/>
                             <ListBox x:Name="EnhancedDetailBox" Grid.Column="1" Style="{StaticResource Dm.Rail}" Margin="0,0,0,22" AutomationProperties.Name="Enhanced detail preference">
@@ -203,6 +204,11 @@
                                 <ListBoxItem Content="Efficient" Tag="Efficient"/>
                                 <ListBoxItem Content="Balanced" Tag="Balanced"/>
                                 <ListBoxItem Content="Maximum quality" Tag="MaximumQuality"/>
+                            </ListBox>
+                            <TextBlock Grid.Row="4" Text="Fit" Style="{StaticResource Dm.Label}" VerticalAlignment="Center"/>
+                            <ListBox x:Name="EnhancedFitBox" Grid.Row="4" Grid.Column="1" Style="{StaticResource Dm.Rail}" AutomationProperties.Name="Enhanced fit preference">
+                                <ListBoxItem Content="Original" Tag="Original" ToolTip="Show the authored frame without cropping."/>
+                                <ListBoxItem Content="Smart Fill" Tag="SmartFill" ToolTip="Crop and gently reframe source pixels to reduce bars; never generates pixels. Experimental."/>
                             </ListBox>
                         </Grid>
 
