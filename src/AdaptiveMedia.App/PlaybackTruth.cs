@@ -143,6 +143,10 @@ public static class PlaybackTruthBuilder
         var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started, delivery,
             current.ObservedDisplay);
         var fallbackLines = delivery.Where(v => v.State == DeliveryState.FellBack).Select(v => v.Label + " → " + v.Evidence).ToList();
+        if (current.Plan.FitPlanned && SmartFitEvidence(observed).Fallback is { } fitFailure)
+            fallbackLines.Add(SmartFitOriginalGeometry(observed)
+                ? "Smart Fill → original framing (" + fitFailure + ")"
+                : "Smart Fill unavailable; renderer framing unverified (" + fitFailure + ")");
         if (fallbackLines.Count == 0) fallbackLines.Add("None observed");
         var healthLines = new List<string> { HealthText.Describe(health?.State ?? SustainedPlaybackHealth.Starting) };
         if (health is { } h && h.WorstCondition is not (SustainedPlaybackHealth.Healthy or SustainedPlaybackHealth.Starting) &&
@@ -216,6 +220,7 @@ public static class PlaybackTruthBuilder
             _ => o.MotionMode switch { "Smooth" => "Smooth motion", "Gentle" => "Gentle motion", _ => "Native cadence" },
         });
         if (o.RtxHdr) lines.Add("RTX Video HDR");
+        if (o.FitMode == "SmartFill") lines.Add("Smart Fill");
         string cleanup = attempt.Plan.Decision?.Cleanup switch
         {
             CleanupImplementation.Gentle => "Gentle",
@@ -281,6 +286,8 @@ public static class PlaybackTruthBuilder
         if (Argument(plan, "--deband") == "yes") lines.Add("Banding reduction (deband)");
         if (plan.BitstreamPlanned) lines.Add("Compressed audio passthrough for supported source codecs; endpoint unverified");
         else if (plan.BitstreamRequested) lines.Add("PCM audio; compressed passthrough unavailable on this runtime");
+        if (plan.FitPlanned) lines.Add("Smart Fill source-only reframing; processing awaits runtime evidence");
+        else if (plan.Requested.FitMode == "SmartFill") lines.Add("Original framing; Smart Fill unavailable on this path");
         if (plan.Color is { } color)
             lines.Add(color.ToneMapToSdr ? "HDR source → SDR renderer target (tone mapping planned)" :
                 plan.RtxHdrConstructed ? "Known SDR → RTX Video HDR renderer target requested; processing and output await observation" :
@@ -310,6 +317,38 @@ public static class PlaybackTruthBuilder
         if (v.ValueKind == JsonValueKind.Array && v.GetArrayLength() > 0 && v[0].ValueKind == JsonValueKind.Object &&
             v[0].TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String) return n.GetString();
         return null;
+    }
+
+    private static bool SmartFitOriginalGeometry(IReadOnlyDictionary<string, JsonElement> observed)
+    {
+        if (Size(observed, "video-out-params") is null) return false;
+        foreach (var name in new[] { "video-zoom", "video-align-x", "video-align-y" })
+            if (!observed.TryGetValue(name, out var value) || !value.TryGetDouble(out double actual) ||
+                !double.IsFinite(actual) || Math.Abs(actual) > 0.01)
+                return false;
+        return true;
+    }
+
+    private static bool SmartFitOriginalEvidence(IReadOnlyDictionary<string, JsonElement> observed) =>
+        observed.TryGetValue("user-data/adaptive/fit", out var fit) && fit.ValueKind == JsonValueKind.Object &&
+        fit.TryGetProperty("state", out var state) && state.ValueKind == JsonValueKind.String &&
+        state.GetString() == "not-needed" && SmartFitOriginalGeometry(observed);
+    private static (bool Active, string? Fallback) SmartFitEvidence(IReadOnlyDictionary<string, JsonElement> observed)
+    {
+        if (!observed.TryGetValue("user-data/adaptive/fit", out var fit) || fit.ValueKind != JsonValueKind.Object ||
+            !fit.TryGetProperty("state", out var state) || state.ValueKind != JsonValueKind.String)
+            return (false, null);
+        if (state.GetString() == "fallback" && fit.TryGetProperty("reason", out var reason) &&
+            reason.ValueKind == JsonValueKind.String && reason.GetString() is { Length: > 0 } why)
+            return (false, why.Length <= 120 ? why : why[..120]);
+        if (state.GetString() != "active" || !fit.TryGetProperty("samples", out var samples) ||
+            !samples.TryGetInt32(out int count) || count <= 0 ||
+            !fit.TryGetProperty("zoom", out var claimedZoom) || !claimedZoom.TryGetDouble(out double expected) ||
+            !observed.TryGetValue("video-zoom", out var actualZoom) || !actualZoom.TryGetDouble(out double actual) ||
+            !double.IsFinite(expected) || !double.IsFinite(actual) || expected <= 0 || Math.Abs(expected - actual) > 0.01 ||
+            Size(observed, "video-out-params") is null)
+            return (false, null);
+        return (true, null);
     }
 
     /// <summary>Only what this attempt's player reported. Anything not reported is
@@ -342,6 +381,10 @@ public static class PlaybackTruthBuilder
             var pending = delivery.Where(v => v.State == DeliveryState.Pending).Select(v => v.Label).ToArray();
             if (pending.Length > 0) lines.Add("Not yet observed: " + string.Join(", ", pending));
         }
+        if (plan.FitPlanned && SmartFitEvidence(observed).Active)
+            lines.Add("Smart Fill active: source frames sampled and renderer zoom observed; no pixels generated");
+        else if (plan.FitPlanned && SmartFitOriginalEvidence(observed))
+            lines.Add("Original framing observed: Smart Fill was unnecessary at the current window size");
         // With no decoder planned there is no verdict, but the decoder in use is still a fact.
         if (!delivery.Any(v => v.Feature == DeliveryFeature.HardwareDecoding))
             switch (Text(observed, "hwdec-current"))

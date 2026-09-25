@@ -110,6 +110,7 @@ internal static class SettingsStore
             "Preserve", "Balanced", "Sharper", "Maximum", "Automatic");
         settings.EnhancedMotion = Choice(settings.EnhancedMotion, "Original", nameof(settings.EnhancedMotion),
             "Original", "CadenceCorrected", "BlendSmooth", "GeneratedMotion", "NeuralMotion", "Automatic");
+        settings.EnhancedFit = Choice(settings.EnhancedFit, "Original", nameof(settings.EnhancedFit), "Original", "SmartFill");
         settings.EnhancedCleanup = Choice(settings.EnhancedCleanup, "Balanced", nameof(settings.EnhancedCleanup),
             "PreserveTexture", "Balanced", "Clean", "Automatic");
         settings.EnhancementPerformance = Choice(settings.EnhancementPerformance, "Balanced", nameof(settings.EnhancementPerformance),

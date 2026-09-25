@@ -167,6 +167,39 @@ internal static class EnhancementPlannerTests
               blendPlan.Arguments.Contains("--interpolation=yes") && blendPlan.Arguments.Any(x => x.StartsWith("--tscale=")),
             "PLAN: BlendSmooth emits the existing mpv temporal interpolation request");
 
+        var cinema = new MediaInfo(1920, 800, 24, "h264", "bt.1886", "bt.709");
+        PlaybackPlan FitPlan(string profile, string fit, int count = 1) => PlaybackPlanBuilder.Build(
+            "mpv.exe", "config", count == 1 ? ["movie.mp4"] : ["movie.mp4", "next.mp4"],
+            new PlaybackOptions(profile, "Off", "Off", false, false, FitMode: fit),
+            cinema, output1440, rtx, "fit-test");
+        var smartFit = FitPlan("Enhanced", "SmartFill");
+        Check(smartFit.FitPlanned && smartFit.Arguments.Any(x => x.Contains("adaptive-playback-fit=yes", StringComparison.Ordinal)),
+            "FIT: explicit Smart Fill starts the source-only analyzer on a single known video");
+        Check(smartFit.Arguments.Contains("--geometry=2560x1440") && smartFit.Arguments.Contains("--keepaspect-window=no") &&
+              !FitPlan("Enhanced", "Original").Arguments.Any(x => x.StartsWith("--geometry=", StringComparison.Ordinal)),
+            "FIT: eligible windowed Smart Fill opens a target-aspect window without changing Original mode");
+        var fullFit = PlaybackPlanBuilder.Build("mpv.exe", "config", ["movie.mp4"],
+            new PlaybackOptions("Enhanced", "Off", "Off", false, false, FitMode: "SmartFill"),
+            cinema, output1440 with { Fullscreen = true }, rtx, "fullscreen-fit-test");
+        Check(fullFit.FitPlanned && fullFit.Arguments.Contains("--fullscreen") &&
+              !fullFit.Arguments.Any(x => x.StartsWith("--geometry=", StringComparison.Ordinal)),
+            "FIT: fullscreen uses the display aspect without window geometry overrides");
+
+        Check(!FitPlan("Reference", "SmartFill").FitPlanned && !FitPlan("Enhanced", "SmartFill", 2).FitPlanned &&
+              !FitPlan("Enhanced", "Original").FitPlanned,
+            "FIT: Reference, playlists, and Original do not silently activate cropping");
+        var hdrFit = PlaybackPlanBuilder.Build("mpv.exe", "config", ["hdr.mkv"],
+            new PlaybackOptions("Enhanced", "Off", "Off", false, false, FitMode: "SmartFill"),
+            cinema with { Transfer = "pq" }, output1440, rtx, "hdr-fit-test");
+        Check(!hdrFit.FitPlanned && hdrFit.Reasons.Any(x => x.Contains("HDR source", StringComparison.Ordinal)),
+            "FIT: unqualified HDR framing remains original");
+        var awaitingFit = new PlaybackAttemptEvidence(503, 1, smartFit, PlaybackAttemptKind.Stable, "stable player") { Started = true };
+        var awaitingTruth = PlaybackTruthBuilder.Build(awaitingFit, [], []);
+        Check(awaitingTruth.Requested.Lines.Any(x => x.Contains("Smart Fill")) &&
+              awaitingTruth.Planned.Lines.Any(x => x.Contains("Smart Fill")) &&
+              !awaitingTruth.Observed.Lines.Any(x => x.Contains("Smart Fill")),
+            "TRUTH: Smart Fill request and plan cannot become observed before analyzer evidence");
+
         var noEvidence = new PlaybackAttemptEvidence(501, 1, semanticNvidia, PlaybackAttemptKind.Stable, "stable player") { Started = true };
         var nvidiaTruth = PlaybackTruthBuilder.Build(noEvidence, [], []);
         Check(nvidiaTruth.Intent.Lines.Any(x => x.Contains("Maximum detail", StringComparison.OrdinalIgnoreCase)) &&

@@ -19,7 +19,8 @@ public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Argu
     MediaInfo Source, PlaybackTarget Target, string Renderer, bool RtxSrConstructed, bool RtxHdrConstructed,
     double Scale, ImmutableArray<string> Reasons, string PipeName, EnhancementIntent? Intent = null,
     EnhancementDecision? Decision = null, bool BitstreamRequested = false, bool BitstreamPlanned = false,
-    double? UserResumeAt = null, double? RecoveryResumeAt = null, DisplayColorPlan? Color = null)
+    double? UserResumeAt = null, double? RecoveryResumeAt = null, DisplayColorPlan? Color = null,
+    bool FitPlanned = false)
 {
     public string ArgumentVectorSha256 => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
         System.Text.Encoding.UTF8.GetBytes(string.Join('\0', Arguments))));
@@ -44,7 +45,8 @@ public static class PlaybackPlanBuilder
         if (!new[] { "Automatic", "Reference", "Enhanced", "Compatibility" }.Contains(options.Profile) ||
             !new[] { "Off", "Automatic", "HighQuality", "RtxVsr" }.Contains(options.UpscaleMode) ||
             !new[] { "Off", "Gentle", "Smooth", "Cadence" }.Contains(options.MotionMode) ||
-            !new[] { "Legacy", "Off", "Gentle", "Normal", "Strong", "Automatic" }.Contains(options.CleanupMode))
+            !new[] { "Legacy", "Off", "Gentle", "Normal", "Strong", "Automatic" }.Contains(options.CleanupMode) ||
+            !new[] { "Original", "SmartFill" }.Contains(options.FitMode))
             throw new ArgumentException("A playback setting is unavailable. Reset it in Settings.");
         EnhancementDecision? decision = options.Intent is null ? null : EnhancementPlanner.Decide(options.Intent,
             new(source, target, capabilities, items.Count));
@@ -55,6 +57,16 @@ public static class PlaybackPlanBuilder
         if (options.AutoHdrSwitch) reasons.Add("Automatic Windows HDR switching is unavailable; the current display state is preserved.");
         var color = DisplayColorPolicy.Decide(source, target.Display);
         double scale = FitScale(source, target);
+        bool fitRequested = options.FitMode == "SmartFill";
+        double sourceAspect = source.Aspect > 0 ? source.Aspect : source.Known ? (double)source.Width / source.Height : 0;
+        double targetAspect = target.Width > 0 && target.Height > 0 ? (double)target.Width / target.Height : 0;
+        double fitRatio = sourceAspect > 0 && targetAspect > 0 ? Math.Max(sourceAspect / targetAspect, targetAspect / sourceAspect) : 0;
+        bool fitPlanned = fitRequested && options.Profile == "Enhanced" && items.Count == 1 && source.Known && !source.IsHdr &&
+            sourceAspect > 0 && targetAspect > 0 && fitRatio >= 1.03 && fitRatio <= 1.4 &&
+            Math.Abs(sourceAspect - (double)source.Width / source.Height) < 0.015;
+        if (fitRequested) reasons.Add(fitPlanned
+            ? "Smart Fill requested for this one source. Runtime frame analysis and actual reframing await observation; only source pixels are displayed."
+            : "Smart Fill is unavailable for this profile, playlist, HDR source, geometry, or aspect-corrected source; original framing is retained.");
         bool rtxRequested = options.UpscaleMode == "RtxVsr";
         bool compatible = options.Profile == "Compatibility";
         bool eligible = capabilities.Nvidia && capabilities.Rtx && capabilities.Vpp && !compatible;
@@ -91,7 +103,15 @@ public static class PlaybackPlanBuilder
         args.Add("--screen=" + target.Screen);
         args.Add("--fs-screen=" + target.Screen);
         if (target.Fullscreen) args.Add("--fullscreen");
-        else if (target.Width > 0 && target.Height > 0) args.Add($"--autofit={target.Width}x{target.Height}");
+        else if (target.Width > 0 && target.Height > 0)
+        {
+            if (fitPlanned)
+            {
+                args.Add($"--geometry={target.Width}x{target.Height}");
+                args.Add("--keepaspect-window=no");
+            }
+            else args.Add($"--autofit={target.Width}x{target.Height}");
+        }
         if (rtxLane)
         {
             args.Add("--gpu-api=d3d11"); args.Add("--gpu-context=d3d11"); args.Add("--hwdec=d3d11va");
@@ -110,7 +130,7 @@ public static class PlaybackPlanBuilder
             args.Add("--dscale=mitchell"); args.Add("--sigmoid-upscaling=yes");
         }
         args.Add("--script=" + Path.Combine(configDir, "runtime", "adaptive-playback.lua"));
-        args.Add($"--script-opts=adaptive-playback-sr={(rtxLane && rtxRequested ? "yes" : "no")},adaptive-playback-hdr={(hdr ? "yes" : "no")}");
+        args.Add($"--script-opts=adaptive-playback-sr={(rtxLane && rtxRequested ? "yes" : "no")},adaptive-playback-hdr={(hdr ? "yes" : "no")},adaptive-playback-fit={(fitPlanned ? "yes" : "no")}");
         string cleanup = options.CleanupMode == "Legacy" ? options.Cleanup ? "Normal" : "Off" : options.CleanupMode;
         if (cleanup == "Automatic")
         {
@@ -138,7 +158,7 @@ public static class PlaybackPlanBuilder
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);
         return new(executable, args.ToImmutable(), options, source, target, renderer, sr, hdr, scale, reasons.ToImmutable(), pipeName,
-            intent, decision, bitstreamRequested, bitstreamRequested, Color: color);
+            intent, decision, bitstreamRequested, bitstreamRequested, Color: color, FitPlanned: fitPlanned);
     }
 }
 

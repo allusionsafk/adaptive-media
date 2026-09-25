@@ -249,6 +249,7 @@ public sealed class PlaybackService
                     "Native Dolby Vision gpu-next", false, false, 1,
                     [.. nativeDecision?.Reasons ?? [], outcome.Plan.Explanation,
                      "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts.",
+                     .. options.FitMode == "SmartFill" ? new[] { "Smart Fill is not used on the native Dolby Vision correctness path; original framing is retained." } : [],
                      .. settings.HdmiBitstream ? new[] { "Compressed audio passthrough is unavailable on the native Dolby Vision runtime; using decoded audio." } : []],
                     nativePipe, options.Intent, nativeDecision, settings.HdmiBitstream, false,
                     Color: DisplayColorPolicy.Decide(source, target.Display));
@@ -932,7 +933,8 @@ public sealed class PlaybackService
                     "interpolation", "audio-out-params", "current-ao", "current-vo", "video-target-params", "user-data/adaptive/state",
                     // Delivery evidence: what the renderer and timing actually did.
                     "time-pos", "playlist-pos", "display-sync-active", "video-speed-correction", "vo-passes",
-                    "user-data/adaptive/source-epoch", "user-data/adaptive/rtx-sr", "user-data/adaptive/rtx-hdr" })
+                    "user-data/adaptive/source-epoch", "user-data/adaptive/rtx-sr", "user-data/adaptive/rtx-hdr",
+                    "user-data/adaptive/fit", "video-zoom", "video-align-x", "video-align-y" })
                 {
                     var data = await ipc.CommandAsync(["get_property", name], queryTimeout.Token);
                     if (data.HasValue)

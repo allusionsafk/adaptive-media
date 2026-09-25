@@ -40,6 +40,7 @@ public sealed class AppSettings
     public string AutomaticStrength { get; set; } = "Normal";
     public string EnhancedDetail { get; set; } = "Balanced";
     public string EnhancedMotion { get; set; } = "Original";
+    public string EnhancedFit { get; set; } = "Original";
     public string EnhancedCleanup { get; set; } = "Balanced";
     public string EnhancementPerformance { get; set; } = "Balanced";
     // Experimental. Off by default: the lane needs a separately provisioned runtime
@@ -69,7 +70,8 @@ public sealed record PlaybackOptions(
     string? YtdlFormat = null,
     bool AutoHdrSwitch = false,
     string CleanupMode = "Legacy",
-    EnhancementIntent? Intent = null);
+    EnhancementIntent? Intent = null,
+    string FitMode = "Original");
 
 
 public sealed class PlaybackLaunchPlan

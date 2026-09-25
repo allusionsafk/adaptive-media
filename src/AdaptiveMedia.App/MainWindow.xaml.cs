@@ -55,7 +55,7 @@ public partial class MainWindow : Window
         Closing += (_, e) => { if (_playing) { e.Cancel = true; _closeAfterPlayback = true; Hide(); } };
         Closed += (_, _) => { _closed = true; _previewCancellation?.Cancel(); SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged; };
         foreach (var box in new Selector[] { ProfileBox, AutomaticGoalBox, AutomaticStrengthBox, AutomaticPerformanceBox,
-                     EnhancedDetailBox, EnhancedMotionBox, EnhancedCleanupBox, EnhancedPerformanceBox })
+                     EnhancedDetailBox, EnhancedMotionBox, EnhancedCleanupBox, EnhancedPerformanceBox, EnhancedFitBox })
             box.SelectionChanged += OptionsChanged;
     }
 
@@ -97,6 +97,7 @@ public partial class MainWindow : Window
         SelectCombo(EnhancedMotionBox, _settings.EnhancedMotion);
         SelectCombo(EnhancedCleanupBox, _settings.EnhancedCleanup);
         SelectCombo(EnhancedPerformanceBox, _settings.EnhancementPerformance);
+        SelectCombo(EnhancedFitBox, _settings.EnhancedFit);
         UpdatePreferenceVisibility();
         ShowGoalExplanation();
         _uiReady = ready;
@@ -123,7 +124,8 @@ public partial class MainWindow : Window
         var intent = EnhancementPreferences.IntentFor(profile, ComboValue(AutomaticGoalBox), ComboValue(AutomaticStrengthBox),
             ComboValue(EnhancedDetailBox), ComboValue(EnhancedMotionBox), ComboValue(EnhancedCleanupBox), performance);
         return new(profile, "Off", "Off", false, _settings.DefaultRtxHdr, _pendingFormat,
-            AutoHdrSwitch: _settings.AutoHdrSwitch, CleanupMode: "Off", Intent: intent);
+            AutoHdrSwitch: _settings.AutoHdrSwitch, CleanupMode: "Off", Intent: intent,
+            FitMode: profile == "Enhanced" ? ComboValue(EnhancedFitBox) : "Original");
     }
 
     private void ShowSettingsWarning()
@@ -139,6 +141,7 @@ public partial class MainWindow : Window
         _settings.AutomaticStrength = ComboValue(AutomaticStrengthBox);
         _settings.EnhancedDetail = ComboValue(EnhancedDetailBox);
         _settings.EnhancedMotion = ComboValue(EnhancedMotionBox);
+        _settings.EnhancedFit = ComboValue(EnhancedFitBox);
         _settings.EnhancedCleanup = ComboValue(EnhancedCleanupBox);
         _settings.EnhancementPerformance = _settings.Profile == "Enhanced"
             ? ComboValue(EnhancedPerformanceBox) : ComboValue(AutomaticPerformanceBox);

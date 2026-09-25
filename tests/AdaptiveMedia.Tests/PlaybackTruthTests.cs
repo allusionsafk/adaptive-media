@@ -50,12 +50,51 @@ internal static class PlaybackTruthTests
         var rtxPlan = Plan(new(true, true, "NVIDIA GeForce RTX 4080", Rtx: true));
         var noRtxPlan = Plan(new(true, false));
 
+        var smartPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["cinema.mkv"],
+            new("Enhanced", "Off", "Off", false, false, FitMode: "SmartFill"),
+            Source1080 with { Height = 800 }, new(2560, 1440), new(false, false), "smart-fit-truth");
+        var smartClaim = PlaybackTruthBuilder.Build(Attempt(401, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"active","samples":4,"zoom":0.43},"video-zoom":0}"""), [], []);
+        Check(!Has(smartClaim.Observed, "Smart Fill"),
+            "a Smart Fill script claim without matching renderer zoom is not observed");
+        var smartObserved = PlaybackTruthBuilder.Build(Attempt(402, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"active","samples":4,"zoom":0.43},"video-zoom":0.43,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(Has(smartObserved.Observed, "Smart Fill") && !Has(smartObserved.Fallback, "Smart Fill"),
+            "Smart Fill is observed only after frame samples and matching renderer geometry");
+        var smartFallback = PlaybackTruthBuilder.Build(Attempt(403, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"fallback","reason":"capture unavailable","samples":0},"video-zoom":0,"video-align-x":0,"video-align-y":0,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(Has(smartFallback.Fallback, "Smart Fill → original framing") && !Has(smartFallback.Observed, "Smart Fill"),
+            "capture failure is an explicit original-framing fallback");
+        var fallbackButZoomed = PlaybackTruthBuilder.Build(Attempt(408, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"fallback","reason":"renderer rejected geometry","samples":1},"video-zoom":0.43,"video-align-x":0,"video-align-y":0,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(Has(fallbackButZoomed.Fallback, "framing unverified") &&
+              !Has(fallbackButZoomed.Fallback, "original framing"),
+            "a script fallback cannot claim original framing while renderer zoom remains active");
+
+        var fitNotNeeded = PlaybackTruthBuilder.Build(Attempt(405, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"not-needed","samples":0},"video-zoom":0,"video-align-x":0,"video-align-y":0,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(Has(fitNotNeeded.Observed, "Original framing") && !Has(fitNotNeeded.Observed, "Smart Fill active"),
+            "a runtime not-needed state reports observed original framing");
+        var fitNotNeededButZoomed = PlaybackTruthBuilder.Build(Attempt(406, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"not-needed","samples":0},"video-zoom":0.43,"video-align-x":0,"video-align-y":0,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(!Has(fitNotNeededButZoomed.Observed, "Original framing"),
+            "a script not-needed claim cannot hide a still-cropped renderer");
+        var fitNotNeededButAligned = PlaybackTruthBuilder.Build(Attempt(407, smartPlan,
+            json: """{"user-data/adaptive/fit":{"state":"not-needed","samples":0},"video-zoom":0,"video-align-x":0.5,"video-align-y":0,"video-out-params":{"w":1920,"h":800}}"""), [], []);
+        Check(!Has(fitNotNeededButAligned.Observed, "Original framing"),
+            "a script not-needed claim cannot hide a still-shifted renderer");
+
+        var fitWithPcm = PlaybackTruthBuilder.Build(Attempt(404, smartPlan with
+            { BitstreamRequested = true, BitstreamPlanned = false }), [], []);
+        Check(Has(fitWithPcm.Planned, "Smart Fill") && Has(fitWithPcm.Planned, "PCM audio"),
+            "Smart Fill does not hide an independent compressed-audio fallback");
+
         var audioPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["film.mkv"],
             new("Reference", "Off", "Off", false, false), Source1080 with { AudioCodec = "eac3" },
             new(1920, 1080), new(false, false), "audio-truth", bitstreamRequested: true);
         var audioPending = PlaybackTruthBuilder.Build(Attempt(1, audioPlan), [], []);
         Check(Has(audioPending.Requested, "Compressed audio passthrough") &&
-              Has(audioPending.Planned, "Compressed audio passthrough") &&
+              Has(audioPending.Planned, "Compressed audio passthrough") && !Has(audioPending.Planned, "PCM audio") &&
               !Has(audioPending.Observed, "Compressed audio"),
             "bitstream request and plan never become observed without runtime output");
         var audioObserved = PlaybackTruthBuilder.Build(Attempt(1, audioPlan,
