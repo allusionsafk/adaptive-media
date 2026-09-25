@@ -270,8 +270,8 @@ public static class EnhancementDeliveryVerifier
                 verdicts.Add(new(DeliveryFeature.RtxVideoHdr, label, DeliveryState.FellBack, "no RTX Video HDR filter is active in the player"));
             else
                 verdicts.Add(new(DeliveryFeature.RtxVideoHdr, label, DeliveryState.Unverified, ack == "accepted"
-                    ? "the driver accepted the request, but it does not report whether HDR conversion processed frames; the HDR output tag is set by the player, not measured"
-                    : "the filter is configured, but no driver acknowledgement was observed for this source"));
+                    ? "the NVIDIA driver accepted the request; frame conversion is not observable from that acknowledgement, and output mode and physical presentation require separate evidence"
+                    : "the filter is configured, but no driver acknowledgement was observed for this source; frame conversion and output are unverified"));
         }
 
         if (planned.Scaler is { } scaler)

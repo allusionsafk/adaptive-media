@@ -13,10 +13,24 @@ namespace AdaptiveMedia.Native
         public uint TargetId;
         public string Name;
         public uint OutputTechnology;
-        public bool Supported;
-        public bool Enabled;
-        public bool ForceDisabled;
         public double RefreshRateHz;
+        public string SourceName;
+        public uint SourceId;
+        public string MonitorDevicePath;
+        public ushort EdidManufacturerId;
+        public ushort EdidProductCode;
+        public bool? HdrSupported;
+        public bool? HdrActive;
+        public bool? HdrUserEnabled;
+        public bool? WcgSupported;
+        public bool? WcgActive;
+        public bool? WcgUserEnabled;
+        public bool? AdvancedColorSupported;
+        public bool? AdvancedColorActive;
+        public bool? AdvancedColorLimitedByPolicy;
+        public string ActiveColorMode;
+        public uint? BitsPerColor;
+        public uint? ColorEncoding;
     }
 
     public static class HdrController
@@ -24,8 +38,8 @@ namespace AdaptiveMedia.Native
         const uint QDC_ONLY_ACTIVE_PATHS = 0x2;
         const int ERROR_INSUFFICIENT_BUFFER = 122;
         const uint GET_TARGET_NAME = 2;
-        const uint GET_ADVANCED_COLOR_INFO = 9;
-        const uint SET_ADVANCED_COLOR_STATE = 10;
+        const uint GET_SOURCE_NAME = 1;
+        const uint GET_ADVANCED_COLOR_INFO_2 = 15;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct LUID { public uint LowPart; public int HighPart; }
@@ -133,6 +147,13 @@ namespace AdaptiveMedia.Native
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string monitorDevicePath;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct SOURCE_DEVICE_NAME
+        {
+            public DEVICE_INFO_HEADER header;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string viewGdiDeviceName;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         struct GET_COLOR_INFO
         {
@@ -140,13 +161,7 @@ namespace AdaptiveMedia.Native
             public uint value;
             public uint colorEncoding;
             public uint bitsPerColorChannel;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct SET_COLOR_STATE
-        {
-            public DEVICE_INFO_HEADER header;
-            public uint value;
+            public uint activeColorMode;
         }
 
         [DllImport("user32.dll")]
@@ -159,10 +174,11 @@ namespace AdaptiveMedia.Native
         static extern int DisplayConfigGetDeviceInfo(ref TARGET_DEVICE_NAME packet);
 
         [DllImport("user32.dll")]
-        static extern int DisplayConfigGetDeviceInfo(ref GET_COLOR_INFO packet);
+        static extern int DisplayConfigGetDeviceInfo(ref SOURCE_DEVICE_NAME packet);
 
         [DllImport("user32.dll")]
-        static extern int DisplayConfigSetDeviceInfo(ref SET_COLOR_STATE packet);
+        static extern int DisplayConfigGetDeviceInfo(ref GET_COLOR_INFO packet);
+
 
         static PATH_INFO[] QueryPaths()
         {
@@ -184,7 +200,7 @@ namespace AdaptiveMedia.Native
             throw new InvalidOperationException("QueryDisplayConfig failed: " + err);
         }
 
-        static string GetName(LUID adapter, uint targetId)
+        static TARGET_DEVICE_NAME GetName(LUID adapter, uint targetId)
         {
             TARGET_DEVICE_NAME p = new TARGET_DEVICE_NAME();
             p.header.type = GET_TARGET_NAME;
@@ -192,14 +208,24 @@ namespace AdaptiveMedia.Native
             p.header.adapterId = adapter;
             p.header.id = targetId;
             int err = DisplayConfigGetDeviceInfo(ref p);
-            if (err == 0 && !String.IsNullOrWhiteSpace(p.monitorFriendlyDeviceName)) return p.monitorFriendlyDeviceName;
-            return "Display " + targetId;
+            if (err != 0) throw new InvalidOperationException("DisplayConfig target name failed: " + err);
+            return p;
+        }
+
+        static string GetSourceName(LUID adapter, uint sourceId)
+        {
+            SOURCE_DEVICE_NAME p = new SOURCE_DEVICE_NAME();
+            p.header.type = GET_SOURCE_NAME;
+            p.header.size = (uint)Marshal.SizeOf(typeof(SOURCE_DEVICE_NAME));
+            p.header.adapterId = adapter;
+            p.header.id = sourceId;
+            return DisplayConfigGetDeviceInfo(ref p) == 0 ? p.viewGdiDeviceName : "";
         }
 
         static GET_COLOR_INFO GetColor(LUID adapter, uint targetId)
         {
             GET_COLOR_INFO p = new GET_COLOR_INFO();
-            p.header.type = GET_ADVANCED_COLOR_INFO;
+            p.header.type = GET_ADVANCED_COLOR_INFO_2;
             p.header.size = (uint)Marshal.SizeOf(typeof(GET_COLOR_INFO));
             p.header.adapterId = adapter;
             p.header.id = targetId;
@@ -221,54 +247,44 @@ namespace AdaptiveMedia.Native
                 item.AdapterHigh = path.targetInfo.adapterId.HighPart;
                 item.TargetId = path.targetInfo.id;
                 item.OutputTechnology = path.targetInfo.outputTechnology;
-                item.Name = GetName(path.targetInfo.adapterId, path.targetInfo.id);
+                item.SourceId = path.sourceInfo.id;
+                item.SourceName = GetSourceName(path.sourceInfo.adapterId, path.sourceInfo.id);
+                try
+                {
+                    var name = GetName(path.targetInfo.adapterId, path.targetInfo.id);
+                    item.Name = string.IsNullOrWhiteSpace(name.monitorFriendlyDeviceName) ? "Display " + item.TargetId : name.monitorFriendlyDeviceName;
+                    item.MonitorDevicePath = name.monitorDevicePath;
+                    item.EdidManufacturerId = name.edidManufactureId;
+                    item.EdidProductCode = name.edidProductCodeId;
+                }
+                catch { item.Name = "Display " + item.TargetId; }
                 item.RefreshRateHz = path.targetInfo.refreshRate.Denominator == 0 ? 0 :
                     (double)path.targetInfo.refreshRate.Numerator / path.targetInfo.refreshRate.Denominator;
                 try
                 {
                     GET_COLOR_INFO c = GetColor(path.targetInfo.adapterId, path.targetInfo.id);
-                    item.Supported = (c.value & 0x1) != 0;
-                    item.Enabled = (c.value & 0x2) != 0;
-                    item.ForceDisabled = (c.value & 0x8) != 0;
+                    var color = AdaptiveMedia.AdvancedColorFlags.Parse(c.value, c.activeColorMode);
+                    item.HdrSupported = color.HdrSupported;
+                    item.HdrUserEnabled = color.HdrUserEnabled;
+                    item.HdrActive = color.HdrActive;
+                    item.WcgSupported = color.WcgSupported;
+                    item.WcgUserEnabled = color.WcgUserEnabled;
+                    item.WcgActive = color.WcgActive;
+                    item.AdvancedColorSupported = color.AdvancedColorSupported;
+                    item.AdvancedColorActive = color.AdvancedColorActive;
+                    item.AdvancedColorLimitedByPolicy = color.LimitedByPolicy;
+                    item.ActiveColorMode = color.Mode;
+                    item.BitsPerColor = c.bitsPerColorChannel;
+                    item.ColorEncoding = c.colorEncoding;
                 }
                 catch
                 {
-                    item.Supported = false;
-                    item.Enabled = false;
-                    item.ForceDisabled = false;
+                    item.ActiveColorMode = "Unknown";
                 }
                 result.Add(item);
             }
             return result.ToArray();
         }
 
-        public static bool SetState(uint adapterLow, int adapterHigh, uint targetId, bool enable)
-        {
-            LUID luid = new LUID();
-            luid.LowPart = adapterLow;
-            luid.HighPart = adapterHigh;
-            GET_COLOR_INFO before;
-            try { before = GetColor(luid, targetId); }
-            catch { return false; }
-            bool supported = (before.value & 0x1) != 0;
-            bool forced = (before.value & 0x8) != 0;
-            if (!supported || (enable && forced)) return false;
-            bool current = (before.value & 0x2) != 0;
-            if (current == enable) return true;
-
-            SET_COLOR_STATE p = new SET_COLOR_STATE();
-            p.header.type = SET_ADVANCED_COLOR_STATE;
-            p.header.size = (uint)Marshal.SizeOf(typeof(SET_COLOR_STATE));
-            p.header.adapterId = luid;
-            p.header.id = targetId;
-            p.value = enable ? 1u : 0u;
-            if (DisplayConfigSetDeviceInfo(ref p) != 0) return false;
-            try
-            {
-                GET_COLOR_INFO after = GetColor(luid, targetId);
-                return ((after.value & 0x2) != 0) == enable;
-            }
-            catch { return false; }
-        }
     }
 }

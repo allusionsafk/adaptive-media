@@ -60,17 +60,52 @@ foreach (string motion in new[] { "Off", "Gentle", "Smooth" })
 Check(!Plan(caps: new(false, true)).RtxSrConstructed, "Non-NVIDIA fallback");
 Check(Plan(caps: new(true, true, "NVIDIA GTX 1080")).Arguments.Contains("--profile=nvidia"), "GTX retains NVIDIA conventional acceleration");
 Check(!Plan(caps: new(true, true, "NVIDIA GTX 1080")).RtxSrConstructed, "GTX never requests RTX");
-Check(Plan(items: ["sdr.mp4", "hdr.mp4"], request: options with { AutoHdrSwitch = true }).Reasons.Any(x => x.Contains("playlists")), "Playlist HDR preservation is explained");
+Check(Plan(items: ["sdr.mp4", "hdr.mp4"], request: options with { AutoHdrSwitch = true }).Reasons.Any(x => x.Contains("switching is unavailable")), "Unavailable HDR switch is explained");
 Check(!Plan(caps: new(true, false)).RtxSrConstructed, "Missing VPP fallback");
 Check(!Plan(new()).RtxSrConstructed, "Unknown probe fallback");
 Check(Plan(output: new(1280,720)).Arguments.Contains("--gpu-context=d3d11"), "RTX-ready lane supports later fullscreen upscale");
 Check(!Plan(output: new(1280,720)).Arguments.Any(x=>x.StartsWith("--vf=")), "RTX-ready lane performs no unnecessary filtering");
 Check(!Plan(new(720, 480, Aspect: 16.0/9)).RtxSrConstructed, "Anamorphic safe fallback");
 Check(!Plan(request: options with { RtxHdr = true }).RtxHdrConstructed, "Do not infer HDR display");
-Check(!Plan(media with { Transfer = "unknown" }, target with { HdrEnabled = true }, options with { RtxHdr = true }).RtxHdrConstructed, "Unknown transfer is not known SDR");
-Check(Plan(output: target with { HdrEnabled = true }, request: options with { RtxHdr = true }).RtxHdrConstructed, "Explicit SDR RTX HDR");
+Check(Plan(media with { Transfer = "pq" }).Arguments.Contains("--target-trc=bt.1886"), "HDR10 on an SDR path must tone-map to SDR");
+Check(Plan(media with { Transfer = "hlg" }).Arguments.Contains("--target-trc=bt.1886"), "HLG on an SDR path must tone-map to SDR");
+Check(Plan().Arguments.Contains("--target-colorspace-hint=auto"), "Renderer must follow the selected display color state");
+Check(!Plan().Arguments.Contains("--inverse-tone-mapping=yes"), "Automatic must never synthesize HDR from SDR");
+Check(!Plan(output: target with { Display = new(HdrSupported: true, HdrActive: false, ActiveColorMode: "SDR", DxgiColorSpace: 0) },
+    request: options with { RtxHdr = true }).RtxHdrConstructed,
+    "HDR capability without active HDR cannot authorize RTX HDR");
+var verifiedHdr = new DisplayCapability(HdrSupported: true, HdrActive: true, ActiveColorMode: "HDR", DxgiColorSpace: 12);
+var g16Flags = AdvancedColorFlags.Parse(0x45, 0);
+Check(g16Flags.AdvancedColorSupported && g16Flags.WcgSupported && !g16Flags.HdrSupported &&
+    !g16Flags.HdrActive && g16Flags.Mode == "SDR", "Measured G16 Info2 flags decode WCG without HDR");
+Check(!new DisplayCapability(HdrSupported: false, HdrActive: false, WcgSupported: true, ActiveColorMode: "SDR", DxgiColorSpace: 0,
+    ReportedMaxLuminance: 500).WindowsHdrPathActive, "WCG or luminance descriptor never establishes HDR support");
+Check(!(verifiedHdr with { DxgiColorSpace = 0 }).WindowsHdrPathActive, "SDR DXGI descriptor contradicts an HDR mode claim");
+Check(!(verifiedHdr with { HdrActive = false }).WindowsHdrPathActive, "HDR support is not active HDR");
+Check(!(verifiedHdr with { HdrSupported = null }).WindowsHdrPathActive, "Unknown support is not an HDR grant");
+Check(!(verifiedHdr with { ActiveColorMode = "WCG" }).WindowsHdrPathActive, "Wide gamut active is not HDR active");
+var displayA = verifiedHdr with { SourceName = @"\\.\DISPLAY1", AdapterLow = 1, TargetId = 11 };
+var displayB = verifiedHdr with { SourceName = @"\\.\DISPLAY2", AdapterLow = 2, TargetId = 22 };
+Check(DisplayCapabilitySelection.ForScreen([displayA, displayB], @"\\.\DISPLAY2") == displayB,
+    "Selected screen maps to its own display path");
+Check(DisplayCapabilitySelection.ForScreen([displayA, displayB], @"\\.\DISPLAY3") is null,
+    "An unmatched screen cannot inherit another target's HDR state");
+Check(DisplayCapabilitySelection.ForScreen([displayA, displayA], @"\\.\DISPLAY1") is null,
+    "Ambiguous duplicate paths cannot authorize HDR");
+Check(DisplayCapabilitySelection.ForAttempt([displayA with { TargetId = 99 }], displayA) is null,
+    "A changed target ID cannot reuse the previous display's HDR observation");
+Check(DisplayCapabilitySelection.ForAttempt([displayA with { PnpId = "DISPLAY\\OTHER" }], displayA) is null,
+    "A replacement monitor on the same connector cannot reuse the previous HDR observation");
+Check(Plan(media with { Transfer = "pq" }, target with { Display = verifiedHdr }).Color?.RendererTarget == ColorDelivery.Pq,
+    "PQ transfer is retained on verified HDR path without inferring DV signalling");
+Check(Plan(media with { Transfer = "pq" }, target with { Display = verifiedHdr }).Arguments.All(x => !x.StartsWith("--target-trc=")),
+    "No forced SDR target on verified HDR path");
+Check(!Plan(media with { Transfer = "unknown" }, target with { Display = verifiedHdr }, options with { RtxHdr = true }).RtxHdrConstructed, "Unknown transfer is not known SDR");
+Check(Plan(output: target with { Display = verifiedHdr }, request: options with { RtxHdr = true }).RtxHdrConstructed, "Verified SDR RTX HDR");
+Check(Plan(output: target with { Display = verifiedHdr }, request: options with { RtxHdr = true }).Color?.RendererTarget == ColorDelivery.Hdr10,
+    "RTX Video HDR is only a planned SDR-to-HDR10 renderer request");
 foreach (string transfer in new[] { "pq", "hlg" })
-    Check(!Plan(media with { Transfer = transfer }, target with { HdrEnabled = true }, options with { RtxHdr = true }).RtxHdrConstructed, "Never apply SDR conversion to HDR source");
+    Check(!Plan(media with { Transfer = transfer }, target with { Display = verifiedHdr }, options with { RtxHdr = true }).RtxHdrConstructed, "Never apply SDR conversion to HDR source");
 foreach (var strength in new[] { ("Off", ""), ("Gentle", "16"), ("Normal", "32"), ("Strong", "48"), ("Automatic", "16") })
 {
     var cleaned = Plan(request: options with { CleanupMode = strength.Item1 });
@@ -83,7 +118,7 @@ Check(!playlistAuto.Arguments.Contains("--deband=yes"), "Automatic cleanup never
 Check(playlistAuto.Reasons.Any(x => x.Contains("playlist")), "Playlist cleanup restraint is explained");
 Check(Plan(request: options with { CleanupMode = "Automatic" }).Arguments.Contains("--deband-threshold=16"), "Automatic cleanup still judges a single known SDR item");
 // A quality request must survive the RTX lane whenever RTX SR is not constructed.
-var hdrOnly = Plan(output: target with { HdrEnabled = true }, request: options with { UpscaleMode = "HighQuality", RtxHdr = true });
+var hdrOnly = Plan(output: target with { Display = verifiedHdr }, request: options with { UpscaleMode = "HighQuality", RtxHdr = true });
 Check(hdrOnly.RtxHdrConstructed && !hdrOnly.RtxSrConstructed, "RTX HDR without RTX SR");
 Check(hdrOnly.Arguments.Contains("--gpu-api=d3d11") && hdrOnly.Arguments.Any(x => x.Contains("nvidia-true-hdr=yes")), "RTX HDR lane pairing");
 Check(hdrOnly.Arguments.Contains("--scale=ewa_lanczossharp") && hdrOnly.Arguments.Contains("--sigmoid-upscaling=yes"), "High quality scaling is honoured on the RTX lane");

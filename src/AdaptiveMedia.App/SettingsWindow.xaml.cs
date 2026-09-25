@@ -11,7 +11,8 @@ public partial class SettingsWindow : Window
         InitializeComponent();
         WindowTheme.UseDarkFrame(this);
         ResultSettings = settings;
-        HdrCheck.IsChecked = settings.AutoHdrSwitch;
+        HdrCheck.IsChecked = false;
+        HdrCheck.IsEnabled = false;
         ExternalCheck.IsChecked = settings.PreferExternalDisplay;
         FullscreenCheck.IsChecked = settings.FullscreenExternal;
         BitstreamCheck.IsChecked = settings.HdmiBitstream;
@@ -23,7 +24,7 @@ public partial class SettingsWindow : Window
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        ResultSettings.AutoHdrSwitch = HdrCheck.IsChecked == true;
+        ResultSettings.AutoHdrSwitch = false;
         ResultSettings.PreferExternalDisplay = ExternalCheck.IsChecked == true;
         ResultSettings.FullscreenExternal = FullscreenCheck.IsChecked == true;
         ResultSettings.HdmiBitstream = BitstreamCheck.IsChecked == true;

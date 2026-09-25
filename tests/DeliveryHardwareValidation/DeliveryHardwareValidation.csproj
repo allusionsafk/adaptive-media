@@ -2,7 +2,7 @@
   <!-- Real-hardware delivery validation. Drives the production PlaybackService
        against a real mpv and GPU; run by tests/Test-EnhancementDeliveryHardware.ps1,
        never by the portable validation gate. -->
-  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks><NoWarn>$(NoWarn);CA1416</NoWarn></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/AdaptiveMedia.App/DvConversion*.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/NativeDvPlayback.cs" />
@@ -14,6 +14,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/MpvIpc.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/DisplayCapability.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackService.cs" />
@@ -25,6 +26,8 @@
     <Compile Include="../../src/AdaptiveMedia.App/SessionDiagnostics.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/HdrSession.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/NativeDisplay.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/DisplayCapabilityProbe.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/DxgiOutputProbe.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/MonitorInventory.cs" />
     <!-- The managed mpv configuration and runtime script, exactly as shipped. -->
     <None Include="../../payload/mpv-config/**" LinkBase="mpv-config" CopyToOutputDirectory="PreserveNewest" />

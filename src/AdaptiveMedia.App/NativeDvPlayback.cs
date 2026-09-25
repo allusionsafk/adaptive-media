@@ -171,6 +171,13 @@ public static class NativeDvPlaybackPlanner
         args.Add("--config-dir=" + configDir);
         args.Add(@"--input-ipc-server=\\.\pipe\" + pipeName);
         args.Add("--vo=gpu-next");
+        args.Add("--target-colorspace-hint=auto");
+        args.Add("--inverse-tone-mapping=no");
+        if (target?.Display?.WindowsHdrPathActive != true)
+        {
+            args.Add("--target-trc=bt.1886");
+            args.Add("--target-prim=bt.709");
+        }
         args.Add("--hwdec=" + hardwareDecoder);
         args.Add("--gpu-api=" + gpuApi);
         args.Add("--gpu-context=" + gpuContext);

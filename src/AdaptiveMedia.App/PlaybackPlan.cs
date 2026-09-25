@@ -12,14 +12,14 @@ public sealed record MediaInfo(int Width = 0, int Height = 0, double Fps = 0,
     public bool IsKnownSdr => Transfer is "bt.1886" or "srgb" or "gamma1.8" or "gamma2.0" or "gamma2.2" or "gamma2.4" or "gamma2.6" or "gamma2.8" or "linear";
     public bool Known => Width > 0 && Height > 0;
 }
-public sealed record PlaybackTarget(int Width, int Height, int Screen = 0, bool Fullscreen = false, bool HdrEnabled = false,
-    double? RefreshRateHz = null);
+public sealed record PlaybackTarget(int Width, int Height, int Screen = 0, bool Fullscreen = false,
+    double? RefreshRateHz = null, DisplayCapability? Display = null);
 public sealed record PlaybackCapabilities(bool Nvidia, bool Vpp, string? NvidiaAdapter = null, bool Rtx = false);
 public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Arguments, PlaybackOptions Requested,
     MediaInfo Source, PlaybackTarget Target, string Renderer, bool RtxSrConstructed, bool RtxHdrConstructed,
     double Scale, ImmutableArray<string> Reasons, string PipeName, EnhancementIntent? Intent = null,
     EnhancementDecision? Decision = null, bool BitstreamRequested = false, bool BitstreamPlanned = false,
-    double? UserResumeAt = null, double? RecoveryResumeAt = null)
+    double? UserResumeAt = null, double? RecoveryResumeAt = null, DisplayColorPlan? Color = null)
 {
     public string ArgumentVectorSha256 => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
         System.Text.Encoding.UTF8.GetBytes(string.Join('\0', Arguments))));
@@ -52,18 +52,22 @@ public static class PlaybackPlanBuilder
         if (decision is not null) options = decision.ApplyTo(options);
         var reasons = ImmutableArray.CreateBuilder<string>();
         if (decision is not null) reasons.AddRange(decision.Reasons);
-        if (options.AutoHdrSwitch && items.Count > 1) reasons.Add("Windows HDR is preserved for playlists because later items may use different color formats.");
+        if (options.AutoHdrSwitch) reasons.Add("Automatic Windows HDR switching is unavailable; the current display state is preserved.");
+        var color = DisplayColorPolicy.Decide(source, target.Display);
         double scale = FitScale(source, target);
         bool rtxRequested = options.UpscaleMode == "RtxVsr";
         bool compatible = options.Profile == "Compatibility";
         bool eligible = capabilities.Nvidia && capabilities.Rtx && capabilities.Vpp && !compatible;
         bool sr = rtxRequested && eligible && source.Known && scale > 1.001 && scale <= 8;
-        bool hdr = options.RtxHdr && eligible && source.Known && source.IsKnownSdr && target.HdrEnabled;
+        bool hdr = options.RtxHdr && eligible && source.Known && color.RtxVideoHdrEligible;
+        if (hdr) color = color with { RendererTarget = ColorDelivery.Hdr10,
+            Reason = "Known SDR and a verified active HDR target permit an RTX Video HDR request; driver acceptance, frame processing, and physical presentation remain unverified." };
+        reasons.Add(color.Reason);
         bool rtxLane = eligible && (rtxRequested || hdr);
         if (rtxRequested && !sr) reasons.Add(!eligible ? "No compatible RTX processing path is available; using conventional scaling." :
             !source.Known ? "Source dimensions unavailable; RTX SR was not enabled." : scale > 8 ? "Required scale exceeds the VPP limit; using conventional scaling." :
             "Source already matches output, is downscaled, or requires aspect correction; RTX SR is unnecessary.");
-        if (options.RtxHdr && !hdr) reasons.Add("RTX HDR requires known SDR video and an enabled HDR display on a compatible path.");
+        if (options.RtxHdr && !hdr) reasons.Add("RTX Video HDR requires known SDR video, a compatible NVIDIA D3D11 path, and a matched target with HDR support and Windows HDR active.");
         if (bitstreamRequested) reasons.Add("Compressed audio passthrough is planned. HDMI connection, receiver support, and Atmos delivery are unverified.");
         // A Windows path parses as an absolute URI with a drive-letter scheme, so match the scheme, not the shape.
         if (!streamHelperAvailable && items.Any(x => Uri.TryCreate(x, UriKind.Absolute, out var link) && link.Scheme is "http" or "https"))
@@ -75,6 +79,13 @@ public static class PlaybackPlanBuilder
         if (!compatible && !rtxLane && capabilities.Nvidia) args.Add("--profile=nvidia");
         args.Add(bitstreamRequested ? "--profile=hdmi-bitstream" : "--profile=pcm-safe");
         args.Add("--vo=gpu-next");
+        args.Add("--target-colorspace-hint=auto");
+        args.Add("--inverse-tone-mapping=no");
+        if (target.Display?.WindowsHdrPathActive != true)
+        {
+            args.Add("--target-trc=bt.1886");
+            args.Add("--target-prim=bt.709");
+        }
         args.Add("--input-ipc-server=\\\\.\\pipe\\" + pipeName);
         args.Add("--terminal=no");
         args.Add("--screen=" + target.Screen);
@@ -127,7 +138,7 @@ public static class PlaybackPlanBuilder
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);
         return new(executable, args.ToImmutable(), options, source, target, renderer, sr, hdr, scale, reasons.ToImmutable(), pipeName,
-            intent, decision, bitstreamRequested, bitstreamRequested);
+            intent, decision, bitstreamRequested, bitstreamRequested, Color: color);
     }
 }
 

@@ -139,6 +139,38 @@ internal static class PlaybackTruthTests
                 json: """{"video-target-params":{"gamma":"bt.1886"}}"""), [], []);
             Check(Has(hdr.Requested, "RTX Video HDR") && Has(hdr.Observed, "SDR output") && !Has(hdr.Observed, "HDR output"),
                 "HDR requested is not HDR output observed");
+            var pq = PlaybackTruthBuilder.Build(Attempt(1, Plan(new(false, false)),
+                json: """{"video-target-params":{"gamma":"pq"}}"""), [], []);
+            Check(Has(pq.Observed, "Renderer target PQ") && !Has(pq.Observed, "HDR output") &&
+                  Has(pq.Observed, "display HDR state unverified"),
+                "renderer PQ metadata is not proof of Windows or physical HDR output");
+            var activeDisplay = new DisplayCapability(HdrSupported: true, HdrActive: true, ActiveColorMode: "HDR", DxgiColorSpace: 12);
+            var prior = Attempt(1, Plan(new(false, false)), json: """{"video-target-params":{"gamma":"pq"}}""");
+            prior.ObserveDisplay(activeDisplay);
+            var next = Attempt(2, Plan(new(false, false)), json: """{"video-target-params":{"gamma":"pq"}}""");
+            var nextTruth = PlaybackTruthBuilder.Build(next, [prior], []);
+            Check(Has(nextTruth.Observed, "display HDR state unverified") && !Has(nextTruth.Observed, "Windows HDR active"),
+                "a prior attempt's matched display state cannot enter the current attempt");
+            prior.ObserveDisplay(null);
+            Check(Has(PlaybackTruthBuilder.Build(prior, [], []).Observed, "display HDR state unverified"),
+                "an active attempt drops an earlier HDR observation when the matched path disappears");
+            var requestedHdr = Plan(new(true, true, "RTX", Rtx: true), RtxSmooth with { RtxHdr = true },
+                new PlaybackTarget(2560, 1440, Display: activeDisplay));
+            var accepted = Attempt(3, requestedHdr, playing: true,
+                json: """{"vf":[{"name":"d3d11vpp","enabled":true,"params":{"nvidia-true-hdr":"yes"}}],"user-data/adaptive/rtx-hdr":"accepted","video-target-params":{"gamma":"pq"}}""");
+            var acceptedTruth = PlaybackTruthBuilder.Build(accepted, [], []);
+            Check(Has(acceptedTruth.Requested, "RTX Video HDR") && Has(acceptedTruth.Planned, "RTX Video HDR") &&
+                  Has(acceptedTruth.Observed, "driver accepted the request") &&
+                  Has(acceptedTruth.Observed, "display HDR state unverified") &&
+                  acceptedTruth.Delivery.Any(v => v.Feature == DeliveryFeature.RtxVideoHdr && v.State == DeliveryState.Unverified),
+                "RTX driver acceptance is not frame processing or observed HDR output mode");
+            var sdrAttempt = Attempt(4, Plan(new(false, false)), json: """{"video-target-params":{"gamma":"gamma2.2"}}""");
+            sdrAttempt.ObserveDisplay(activeDisplay with { HdrSupported = false, HdrActive = false,
+                ActiveColorMode = "SDR", DxgiColorSpace = 0, WcgSupported = true });
+            var sdrTruth = PlaybackTruthBuilder.Build(sdrAttempt, [], []);
+            Check(Has(sdrTruth.Observed, "Windows HDR inactive on the matched target") &&
+                  !Has(sdrTruth.Observed, "HDR output"),
+                "WCG support and SDR renderer output do not become observed HDR delivery");
             var fallback = PlaybackTruthBuilder.Build(Attempt(1, rtxPlan, playing: true, json: """{"video-sync":"audio","interpolation":false,"display-sync-active":false}"""), [], []);
             Check(Has(fallback.Fallback, "Temporal blend smoothing → the player returned to audio-clock timing because display timing was unstable") &&
                   !Has(fallback.Observed, "Temporal blend smoothing: verified"), "a motion fallback is reported as a fallback");
@@ -150,7 +182,8 @@ internal static class PlaybackTruthTests
         foreach (var kind in Enum.GetValues<PlaybackAttemptKind>())
         {
             var t = PlaybackTruthBuilder.Build(Attempt(1, Plan(caps, options), kind, fel: kind != PlaybackAttemptKind.Stable), [], []);
-            var expected = kind == PlaybackAttemptKind.Stable ? new[] { "Nothing observed yet" } : new[] { "Composition not yet observed" };
+            var expected = kind == PlaybackAttemptKind.Stable ? new[] { "Nothing observed yet" } :
+                new[] { "Composition not yet observed", "Dolby Vision display signalling unverified; renderer and metadata evidence do not establish proprietary display mode" };
             Check(t.Observed.Lines.SequenceEqual(expected), $"no evidence, no observation ({caps.Rtx}/{options.Profile}/{kind})");
         }
 
@@ -166,6 +199,16 @@ internal static class PlaybackTruthTests
             Check(!Has(baseOnly.Observed, "FEL") && Has(baseOnly.Observed, "Base layer only"), "base-layer evidence: no FEL claim");
             var fel = PlaybackTruthBuilder.Build(Attempt(1, nativePlan, PlaybackAttemptKind.NativeCurrent, native: Fel, fel: true), [], []);
             Check(Has(fel.Observed, "BL + EL decoded (2 decoder instances)") && Has(fel.Observed, "FEL composition observed"), "real FEL evidence is reported");
+            var pqFel = PlaybackTruthBuilder.Build(Attempt(1, nativePlan, PlaybackAttemptKind.NativeCurrent, native: Fel, fel: true,
+                json: """{"video-target-params":{"gamma":"pq"}}"""), [], []);
+            Check(Has(pqFel.Observed, "FEL composition observed") && Has(pqFel.Observed, "Renderer target PQ") &&
+                  Has(pqFel.Observed, "Dolby Vision display signalling unverified") && !Has(pqFel.Observed, "HDR output"),
+                "FEL composition and PQ renderer intent do not establish Dolby Vision display signalling");
+            var rpuOnly = PlaybackTruthBuilder.Build(Attempt(1, nativePlan, PlaybackAttemptKind.NativeCurrent,
+                native: new NativeCompositionFacts(true, 1, false, false, "BaseLayerOnly", null, RpuProcessed: true), fel: true), [], []);
+            Check(Has(rpuOnly.Observed, "RPU metadata processing observed") && !Has(rpuOnly.Observed, "FEL composition observed") &&
+                  Has(rpuOnly.Observed, "Dolby Vision display signalling unverified"),
+                "RPU processing alone establishes neither FEL nor proprietary display mode");
         }
 
         // 5-7, 9. Recovery reports what launched; resume only from the launched plan.

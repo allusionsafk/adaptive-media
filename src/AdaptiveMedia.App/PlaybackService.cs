@@ -166,19 +166,22 @@ public sealed class PlaybackService
         }
         // Re-read cheap display geometry for every preparation; GPU inventory may be cached.
         system.Screens = MonitorInventory.GetScreens();
-        Native.DisplayColorInfo[] displays;
-        try { displays = Native.HdrController.GetDisplays(); } catch { displays = []; }
+        var displayCapabilities = DisplayCapabilityProbe.Read();
         int screen = Array.FindIndex(system.Screens, x => x.Primary);
         if (screen < 0) screen = 0;
         if (settings.PreferExternalDisplay && system.Screens.Length > 1)
             screen = Enumerable.Range(0, system.Screens.Length).Where(i => !system.Screens[i].Primary)
                 .OrderByDescending(i => (long)system.Screens[i].Width * system.Screens[i].Height).FirstOrDefault(screen);
         var selected = system.Screens.ElementAtOrDefault(screen);
-        bool hdrEnabled = displays.Length == 1 && displays[0].Supported && displays[0].Enabled && !displays[0].ForceDisabled;
+        var screenName = system.Screens.ElementAtOrDefault(destination?.Screen ?? screen)?.Name;
+        var display = DisplayCapabilitySelection.ForScreen(displayCapabilities, screenName);
         bool fullscreen = system.Screens.Length > 1 && selected is { Primary: false } && settings.FullscreenExternal;
-        double? refreshRate = displays.Length == 1 && displays[0].RefreshRateHz > 0 ? displays[0].RefreshRateHz : null;
+        double? refreshRate = display?.RefreshRateHz is > 0 ? display.RefreshRateHz : null;
         var target = destination ?? new PlaybackTarget(selected is null ? 0 : fullscreen ? selected.Width : (int)(selected.WorkWidth * .8),
-            selected is null ? 0 : fullscreen ? selected.Height : (int)(selected.WorkHeight * .8), screen, fullscreen, hdrEnabled, refreshRate);
+            selected is null ? 0 : fullscreen ? selected.Height : (int)(selected.WorkHeight * .8), screen, fullscreen, refreshRate, display);
+        // PlaybackRequest.Target may come from JSON. Geometry is a request; the
+        // caller's capability claim is never trusted over a local matched probe.
+        if (destination is not null) target = destination with { Display = display };
         var playbackCapabilities = new PlaybackCapabilities(system.HasNvidia, capability.Vpp, system.NvidiaAdapter,
             system.NvidiaAdapter?.Contains("RTX", StringComparison.OrdinalIgnoreCase) == true);
         EnhancementDecision? enhancementDecision = options.Intent is null ? null : EnhancementPlanner.Decide(options.Intent,
@@ -247,14 +250,15 @@ public sealed class PlaybackService
                     [.. nativeDecision?.Reasons ?? [], outcome.Plan.Explanation,
                      "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts.",
                      .. settings.HdmiBitstream ? new[] { "Compressed audio passthrough is unavailable on the native Dolby Vision runtime; using decoded audio." } : []],
-                    nativePipe, options.Intent, nativeDecision, settings.HdmiBitstream, false);
+                    nativePipe, options.Intent, nativeDecision, settings.HdmiBitstream, false,
+                    Color: DisplayColorPolicy.Decide(source, target.Display));
                 if (_preparedReports.Count >= 32) _preparedReports.Clear();
                 if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
                 _nativeSelections[nativePipe] = new(outcome,
                     NativeDvRuntimeLifecycle.IsGenerationId(generation) ? generation : null, mpv, retainedSelection);
                 LastNativeOutcome = outcome;
                 _preparedReports[nativePipe] = new() { Plan = nativePlan, MpvVersion = outcome.Runtime!.MpvVersion,
-                    Summary = nativePlan.Summary, Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens } };
+                    Summary = nativePlan.Summary, Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens, DisplayCapabilities = displayCapabilities } };
                 return nativePlan;
             }
             DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason"));
@@ -266,8 +270,8 @@ public sealed class PlaybackService
         if (_preparedReports.Count >= 32) { _preparedReports.Clear(); _preparedNotes.Clear(); }
         if (nativeNote is not null) _preparedNotes[plan.PipeName] = nativeNote;
         _preparedReports[plan.PipeName] = new() { Plan = plan, MpvVersion = capability.Version, Summary = plan.Summary,
-            Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens, system.Audio, system.Power,
-                Topology = "GPU inventory does not establish display ownership. VRR and endpoint bitstream support are unknown." } };
+            Hardware = new { system.Gpu, system.Cpu, system.Drivers, system.Screens, system.Audio, system.Power, DisplayCapabilities = displayCapabilities,
+                Topology = "DisplayConfig and DXGI identify the matched active output when both adapter LUID and GDI source name agree. VRR and endpoint bitstream support remain unknown." } };
         return plan;
     }
 
@@ -764,6 +768,7 @@ public sealed class PlaybackService
     {
         LastReport!.Attempts.Add(plan);
         LastReport.Observed.Clear();
+        LastReport.ObservedDisplay = null;
         LastReport.MpvVersion = "unknown";
         LastReport.Error = null;
         bool isNative = _nativeAttempts.ContainsKey(plan.PipeName);
@@ -939,6 +944,16 @@ public sealed class PlaybackService
                     else observed.Remove(name);
                 }
                 LastReport!.Observed = new(observed);
+                DisplayCapability? observedPath = null;
+                if (observed.TryGetValue("video-out-params", out var outputParams) &&
+                    outputParams.ValueKind == JsonValueKind.Object &&
+                    outputParams.TryGetProperty("w", out var outputWidth) && outputWidth.TryGetInt32(out int ow) && ow > 0 &&
+                    plan.Target.Display is { } plannedDisplay)
+                {
+                    observedPath = DisplayCapabilitySelection.ForAttempt(DisplayCapabilityProbe.Read(), plannedDisplay);
+                }
+                evidence.ObserveDisplay(observedPath);
+                LastReport.ObservedDisplay = observedPath;
                 if (plan.Requested.MotionMode != "Off" && observed.TryGetValue("video-sync", out var sync) && sync.ValueKind == JsonValueKind.String && sync.GetString() == "audio")
                 {
                     const string reason = "Smooth motion was disabled because display timing became unstable.";
@@ -1067,7 +1082,8 @@ public sealed class PlaybackService
 
     private static NativeCompositionFacts CompositionFacts(NativeDvObservation o) => new(
         o.Renderer == DvObservedState.Active, o.DecoderInstances, o.BlElPairing == DvObservedState.Active,
-        o.Delivered == NativeDvDelivered.FullEnhancementLayer, o.Delivered.ToString(), o.HardwareDecoderInUse);
+        o.Delivered == NativeDvDelivered.FullEnhancementLayer, o.Delivered.ToString(), o.HardwareDecoderInUse,
+        o.Rpu == DvObservedState.Active);
 
     /// <summary>Read a file the player still holds open for writing.</summary>
     private static string ReadSharedText(string path)

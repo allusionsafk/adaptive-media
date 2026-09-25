@@ -618,7 +618,7 @@ Check(probeArgv[^1] == @"C:\media\authored.mkv" && probeArgv[^2] == "--", "The p
 // The product plan keeps the zero-scratch and isolation invariants.
 var productPlan = NativeDvPlaybackPlanner.Build(fel, pinned, @"C:\media\authored.mkv", "config", "pipe",
     experimentalLaneEnabled: true, enhancementLayer: true, logPath: @"C:\logs\native-dv.log",
-    target: new PlaybackTarget(2560, 1440, 1, false, true), allowUnclassifiedEnhancementLayer: true);
+    target: new PlaybackTarget(2560, 1440, 1, false), allowUnclassifiedEnhancementLayer: true);
 Check(productPlan.Supported && productPlan.Arguments.Contains("--no-config"), "The product plan keeps the proven isolated invocation");
 Check(productPlan.Arguments.Contains("--cache-on-disk=no"), "Zero media scratch survives productization");
 Check(productPlan.Arguments.Contains(@"--log-file=C:\logs\native-dv.log"), "The product plan writes a bounded diagnostic log");
@@ -626,6 +626,39 @@ Check(productPlan.Arguments.Any(x => x.StartsWith("--msg-level=") && x.Contains(
     "Debug level keeps the composition evidence without a per-frame line that would grow with duration");
 Check(productPlan.Arguments.Contains("--autofit=2560x1440") && productPlan.Arguments.Contains("--screen=1"),
     "The product plan honours the chosen display");
+Check(productPlan.Arguments.Contains("--target-trc=bt.1886") && productPlan.Arguments.Contains("--target-prim=bt.709") &&
+    productPlan.Arguments.Contains("--target-colorspace-hint=auto"),
+    "Native Profile 7 on an unverified HDR target requests managed SDR tone mapping");
+var hdrDisplay = new DisplayCapability(HdrSupported: true, HdrActive: true, ActiveColorMode: "HDR", DxgiColorSpace: 12);
+var nativeHdr = NativeDvPlaybackPlanner.Build(fel, pinned, @"C:\media\authored.mkv", "config", "hdr-pipe",
+    experimentalLaneEnabled: true, enhancementLayer: true,
+    target: new PlaybackTarget(2560, 1440, Display: hdrDisplay), allowUnclassifiedEnhancementLayer: true);
+Check(nativeHdr.Supported && nativeHdr.Arguments.Contains("--target-colorspace-hint=auto") &&
+    !nativeHdr.Arguments.Any(x => x.StartsWith("--target-trc=")),
+    "Native Profile 7 keeps HDR source colour on a verified active HDR path");
+var oldDataDir = Environment.GetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR");
+var isolatedHdrDir = Path.Combine(Path.GetTempPath(), "DemiMedia-HdrSession-" + Guid.NewGuid().ToString("N"));
+try
+{
+    Directory.CreateDirectory(isolatedHdrDir);
+    Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", isolatedHdrDir);
+    var stalePath = Path.Combine(isolatedHdrDir, "hdr-recovery.json");
+    File.WriteAllText(stalePath, "stale state must not be applied");
+    var switchPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["movie.mkv"],
+        new PlaybackOptions("Reference", "Off", "Off", false, false, AutoHdrSwitch: true), video,
+        new PlaybackTarget(1920, 1080), new(false, false), "switch-test");
+    var switchReport = new SessionDiagnostics();
+    using (HdrSession.Begin(switchPlan, switchReport)) { }
+    Check(File.ReadAllText(stalePath) == "stale state must not be applied" &&
+        !File.Exists(Path.Combine(isolatedHdrDir, "hdr-session.lock")) &&
+        switchReport.FallbackHistory.Any(x => x.Contains("unavailable")),
+        "Stale HDR state cannot be blindly restored and switching is truthfully unavailable");
+}
+finally
+{
+    Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR", oldDataDir);
+    Directory.Delete(isolatedHdrDir, true);
+}
 Check(!productPlan.Arguments.Any(x => x.Contains("mkvextract", StringComparison.OrdinalIgnoreCase) ||
     x.Contains("dovi_tool", StringComparison.OrdinalIgnoreCase) || x.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)),
     "Native playback never invokes the Dolby Vision export tools");
