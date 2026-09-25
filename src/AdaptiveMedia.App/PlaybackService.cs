@@ -44,7 +44,7 @@ public sealed class PlaybackService
 
     /// <summary>The native Dolby Vision lane. Injectable so tests can drive
     /// provisioning without reaching the network.</summary>
-    public NativeDvLane? NativeDolbyVision { get; init; }
+    public NativeDvLane? NativeDolbyVision { get; init; } = NativeDvLane.CreateDefault();
 
     /// <summary>What the native lane decided for the most recent preparation,
     /// including the exact reason when it was not selected.</summary>
@@ -129,6 +129,9 @@ public sealed class PlaybackService
     public async Task<PlaybackPlan> PrepareAsync(IReadOnlyList<string> items, PlaybackOptions options,
         SystemSummary system, AppSettings settings, PlaybackTarget? destination = null)
     {
+        LastNativeOutcome = null;
+        LastNativeLifecycle = null;
+        LastNativeFallback = null;
         var expanded = new List<string>();
         string[] extensions = [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".flv", ".wmv", ".mp3", ".flac", ".m4a", ".aac", ".opus", ".wav", ".ogg"];
         foreach (string item in items)
@@ -242,8 +245,9 @@ public sealed class PlaybackService
                     nativeOptions with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
                     "Native Dolby Vision gpu-next", false, false, 1,
                     [.. nativeDecision?.Reasons ?? [], outcome.Plan.Explanation,
-                     "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts."],
-                    nativePipe, options.Intent, nativeDecision);
+                     "Full enhancement-layer composition is requested; what it actually delivers is reported after playback starts.",
+                     .. settings.HdmiBitstream ? new[] { "Compressed audio passthrough is unavailable on the native Dolby Vision runtime; using decoded audio." } : []],
+                    nativePipe, options.Intent, nativeDecision, settings.HdmiBitstream, false);
                 if (_preparedReports.Count >= 32) _preparedReports.Clear();
                 if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
                 _nativeSelections[nativePipe] = new(outcome,
@@ -325,7 +329,7 @@ public sealed class PlaybackService
         // which V1 reports rather than relaunching from the beginning.
         if (code != 0 && plan.Renderer == "RTX D3D11" && stableRun.Health?.PlaybackProgressed != true)
         {
-            const string reason = "RTX playback failed. Retrying once with compatibility video and PCM audio.";
+            const string reason = "The player stopped before useful playback. Retrying once with compatibility video and PCM audio; the cause is unconfirmed.";
             LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason);
             DiagnosticsStore.Event("warning", "fallback", reason);
             var fallback = CompatibilityRetryPlan(plan, Path.Combine(AppContext.BaseDirectory, "mpv-config"));
@@ -546,13 +550,13 @@ public sealed class PlaybackService
                 return new(false, run.ExitCode, WithResume(BuildStableFallbackPlan(plan), resumeAt));
             }
 
-            var retryPlan = WithResume(new PlaybackPlan(retryOutcome.Plan.Executable!, retryOutcome.Plan.Arguments,
+            var retryPlan = WithResume(CarryUserResume(plan, new PlaybackPlan(retryOutcome.Plan.Executable!, retryOutcome.Plan.Arguments,
                 plan.Requested, plan.Source, plan.Target, "Native Dolby Vision gpu-next (previous runtime)",
                 false, false, 1,
                 [retryOutcome.Plan.Explanation,
                  decision.Explanation,
                  "What this attempt delivers is established from its own evidence, not from the attempt it replaces."],
-                retryPipe), resumeAt);
+                retryPipe, BitstreamRequested: plan.BitstreamRequested)), resumeAt);
 
             if (_nativeSelections.Count >= 32) _nativeSelections.Clear();
             _nativeSelections[retryPipe] = new(retryOutcome, fallback?.GenerationId, selection.StableExecutable, true);
@@ -583,8 +587,27 @@ public sealed class PlaybackService
         var arguments = plan.Arguments.Where(x => !x.StartsWith("--start=", StringComparison.Ordinal)).ToList();
         int split = arguments.IndexOf("--");
         arguments.Insert(split < 0 ? arguments.Count : split, PlaybackRecoveryText.StartArgument(at));
-        return plan with { Arguments = [.. arguments],
-            Reasons = plan.Reasons.Add("Resumed near " + PlaybackRecoveryText.Position(at) + " after automatic recovery.") };
+        return plan with { Arguments = [.. arguments], UserResumeAt = null, RecoveryResumeAt = at,
+            Reasons = plan.Reasons.Where(x => !x.StartsWith("User chose Resume", StringComparison.Ordinal)).ToImmutableArray()
+                .Add("Resumed near " + PlaybackRecoveryText.Position(at) + " after automatic recovery.") };
+    }
+
+    /// <summary>A startup fallback keeps the user's selected starting point. Once
+    /// playback has progressed, WithResume replaces it with that attempt's own
+    /// confirmed recovery point and labels the new origin accordingly.</summary>
+    private static PlaybackPlan CarryUserResume(PlaybackPlan original, PlaybackPlan replacement)
+    {
+        if (original.UserResumeAt is not double at) return replacement;
+        var args = replacement.Arguments.ToList();
+        int split = args.IndexOf("--");
+        if (split < 0) throw new InvalidOperationException("The replacement plan has no source boundary.");
+        args.Insert(split++, "--resume-playback=no");
+        string? stateDir = original.Arguments.TakeWhile(x => x != "--")
+            .FirstOrDefault(x => x.StartsWith("--watch-later-dir=", StringComparison.Ordinal));
+        if (stateDir is not null) args.Insert(split++, stateDir);
+        args.Insert(split, PlaybackRecoveryText.StartArgument(at));
+        return replacement with { Arguments = [.. args], UserResumeAt = at,
+            Reasons = replacement.Reasons.Add("User chose Resume near " + PlaybackRecoveryText.Position(at) + ".") };
     }
 
     private void RecordRecovery(PlaybackRecoveryDecision decision, double? resumeAt, AttemptRun run, PlaybackAttemptKind failedKind,
@@ -699,7 +722,7 @@ public sealed class PlaybackService
         StatusChanged?.Invoke(message);
     }
 
-    /// <summary>The one retry for an RTX player that failed before playing: the
+    /// <summary>The one retry for a planned RTX path whose player stopped before playing: the
     /// compatibility path, with no NVIDIA processing. An intent is replaced with the
     /// planner's own Compatibility intent; left in place, the planner would decide
     /// the retry afresh and override the compatibility profile with the very
@@ -715,7 +738,13 @@ public sealed class PlaybackService
         var retry = PlaybackPlanBuilder.Build(failed.Executable, configDir, items, options, failed.Source, failed.Target,
             new(false, false), "adaptive-media-" + Guid.NewGuid().ToString("N"));
         // The truth chain explains a path from its plan, so the plan carries why it exists.
-        return retry with { Reasons = retry.Reasons.Insert(0, "The RTX player failed before playback started; this is the single retry on the compatibility path, without NVIDIA processing.") };
+        retry = CarryUserResume(failed, retry);
+        return retry with
+        {
+            BitstreamRequested = failed.BitstreamRequested,
+            Reasons = retry.Reasons.Insert(0,
+                "The player stopped before useful playback; cause unconfirmed. This is the single compatibility retry without NVIDIA processing, using PCM audio.")
+        };
     }
 
     /// <summary>The established stable path for this media, used once the native
@@ -724,9 +753,10 @@ public sealed class PlaybackService
     private PlaybackPlan BuildStableFallbackPlan(PlaybackPlan native)
     {
         string[] items = native.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
-        return PlaybackPlanBuilder.Build(_nativeSelections[native.PipeName].StableExecutable, Path.Combine(AppContext.BaseDirectory, "mpv-config"), items,
+        var stable = PlaybackPlanBuilder.Build(_nativeSelections[native.PipeName].StableExecutable, Path.Combine(AppContext.BaseDirectory, "mpv-config"), items,
             native.Requested, native.Source, native.Target, new(false, false),
             "adaptive-media-" + Guid.NewGuid().ToString("N"));
+        return CarryUserResume(native, stable) with { BitstreamRequested = native.BitstreamRequested };
     }
 
     private async Task<AttemptRun> RunOnceAsync(PlaybackPlan plan, double? stopAfterSeconds,

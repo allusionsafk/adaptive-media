@@ -30,7 +30,7 @@ public sealed class AppSettings
     public bool PreferExternalDisplay { get; set; } = true;
     public bool FullscreenExternal { get; set; } = true;
     public bool HdmiBitstream { get; set; } = false;
-    public bool MpcFallback { get; set; } = true;
+    public bool MpcFallback { get; set; } = false;
     public string DefaultUpscaleMode { get; set; } = "Off";
     public string DefaultMotionMode { get; set; } = "Off";
     public bool DefaultCleanup { get; set; } = false;

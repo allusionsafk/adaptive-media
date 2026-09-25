@@ -183,6 +183,20 @@ internal static class PlaybackRecoveryTests
             var plan = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
                 new SystemSummary { MpvPath = stableExe }, new AppSettings { NativeDolbyVisionLane = true, AllowNativeDolbyVisionDownload = false, AutoHdrSwitch = false }, new(1280, 720));
             check(plan.Executable == Path.Combine(storeRoot, a.VersionId, "DolbyVisionTests.exe"), "RECOVERY: production PrepareAsync selected current generation");
+            var disabled = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
+                new SystemSummary { MpvPath = stableExe },
+                new AppSettings { NativeDolbyVisionLane = false, AllowNativeDolbyVisionDownload = false, AutoHdrSwitch = false },
+                new(1280, 720));
+            check(!disabled.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal) && service.LastNativeOutcome is null,
+                "RECOVERY: disabled native setting selects stable playback and clears a prior native decision");
+            var nativeAudio = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
+                new SystemSummary { MpvPath = stableExe },
+                new AppSettings { NativeDolbyVisionLane = true, HdmiBitstream = true, AllowNativeDolbyVisionDownload = false, AutoHdrSwitch = false },
+                new(1280, 720));
+            check(nativeAudio.Renderer.StartsWith("Native Dolby Vision", StringComparison.Ordinal) &&
+                  nativeAudio.BitstreamRequested && !nativeAudio.BitstreamPlanned &&
+                  nativeAudio.Reasons.Any(x => x.Contains("passthrough is unavailable")),
+                "RECOVERY: native DV keeps the audio request visible but does not pretend to plan unqualified passthrough");
             if (only == "probe") return;
             void Mode(NativeDvRuntimeDescriptor d, string mode) => File.WriteAllText(Path.Combine(storeRoot, d.VersionId, "behavior.txt"), mode);
             if (only is null or "validation")
@@ -250,9 +264,19 @@ internal static class PlaybackRecoveryTests
                           PlannedDelivery.From(retry) is { Decoder: "d3d11va-copy", VppScaling: false, RtxSuperResolution: false, DisplayResample: false },
                         "DELIVERY: the RTX compatibility retry is the compatibility path it announces (" + (failedRtx.Intent is null ? "legacy" : "intent") + ")");
                 }
-                check(PlaybackService.CompatibilityRetryPlan(rtxIntent, "config") is { Intent.Mode: EnhancementMode.Compatibility } intentRetry &&
-                      intentRetry.Reasons[0].StartsWith("The RTX player failed before playback started"),
-                    "DELIVERY: an intent-driven retry is planned from the planner's Compatibility intent, and says why it exists");
+                var neutralRetry = PlaybackService.CompatibilityRetryPlan(rtxIntent with { Reasons = ["stale RTX explanation"] }, "config");
+                check(neutralRetry is { Intent.Mode: EnhancementMode.Compatibility } &&
+                      neutralRetry.Reasons[0].Contains("player stopped before useful playback") &&
+                      !neutralRetry.Reasons.Any(x => x.Contains("stale RTX explanation") || x.Contains("RTX player failed")),
+                    "DELIVERY: a pre-frame death chooses compatibility without blaming RTX or inheriting the failed attempt's reasons");
+                var userStartArgs = rtxIntent.Arguments.ToList();
+                userStartArgs.Insert(userStartArgs.IndexOf("--"), "--start=42");
+                var userRtx = rtxIntent with { Arguments = [.. userStartArgs], UserResumeAt = 42,
+                    Reasons = rtxIntent.Reasons.Add("User chose Resume near 00:00:42.") };
+                var userRetry = PlaybackService.CompatibilityRetryPlan(userRtx, "config");
+                check(userRetry.UserResumeAt == 42 && userRetry.RecoveryResumeAt is null &&
+                      userRetry.Arguments.Contains("--start=42") && !userRetry.Reasons.Any(x => x.Contains("stale RTX")),
+                    "DELIVERY: a pre-frame compatibility retry keeps the user's explicit resume point");
                 Mode(a, "fail"); Mode(b, "partial");
                 await service.LaunchAsync(plan, 0);
                 check(service.LastReport!.Attempts.Count == 3 && service.LastReport.Attempts.Take(2).Select(x => x.Executable).Distinct().Count() == 2, "RECOVERY: exactly A then B then stable, with no third native launch");
@@ -335,7 +359,7 @@ internal static class PlaybackRecoveryTests
                     check(!truth.Observed.Lines.Any(x => x.Contains("FEL")) && truth.History.Single().Lines[0] == "Full FEL observed",
                         tag + "TRUTH: the failed attempt's FEL is history only; the replacement's Observed is its own");
                     check(truth.Health.Lines[0] == "Stopped by user" && truth.Planned.Lines.Any(x => x.Contains("(previous)")) &&
-                          truth.Planned.Lines.Any(x => x.StartsWith("Start near 00:00:")), tag + "TRUTH: current attempt planned/health are the replacement's");
+                          truth.Planned.Lines.Any(x => x.StartsWith("Automatic recovery resume near 00:00:")), tag + "TRUTH: current attempt planned/health are the replacement's");
                     // Delivery evidence stays with the attempt that produced it.
                     check(truth.Delivery.Single(v => v.Feature == DeliveryFeature.HardwareDecoding).State == DeliveryState.FellBack &&
                           truth.Fallback.Lines.Contains("D3D11VA hardware decoding → software decoding observed (hwdec-current = no)") &&

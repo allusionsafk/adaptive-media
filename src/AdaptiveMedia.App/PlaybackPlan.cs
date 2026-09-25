@@ -5,7 +5,8 @@ namespace AdaptiveMedia;
 
 public sealed record MediaInfo(int Width = 0, int Height = 0, double Fps = 0,
     string Codec = "unknown", string Transfer = "unknown", string Primaries = "unknown",
-    string AudioCodec = "unknown", string PixelFormat = "unknown", double Aspect = 0)
+    string AudioCodec = "unknown", string PixelFormat = "unknown", double Aspect = 0,
+    double DurationSeconds = 0)
 {
     public bool IsHdr => Transfer is "pq" or "hlg";
     public bool IsKnownSdr => Transfer is "bt.1886" or "srgb" or "gamma1.8" or "gamma2.0" or "gamma2.2" or "gamma2.4" or "gamma2.6" or "gamma2.8" or "linear";
@@ -17,13 +18,14 @@ public sealed record PlaybackCapabilities(bool Nvidia, bool Vpp, string? NvidiaA
 public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Arguments, PlaybackOptions Requested,
     MediaInfo Source, PlaybackTarget Target, string Renderer, bool RtxSrConstructed, bool RtxHdrConstructed,
     double Scale, ImmutableArray<string> Reasons, string PipeName, EnhancementIntent? Intent = null,
-    EnhancementDecision? Decision = null)
+    EnhancementDecision? Decision = null, bool BitstreamRequested = false, bool BitstreamPlanned = false,
+    double? UserResumeAt = null, double? RecoveryResumeAt = null)
 {
     public string ArgumentVectorSha256 => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
         System.Text.Encoding.UTF8.GetBytes(string.Join('\0', Arguments))));
     public string Summary => $"{(Source.Known ? $"{Source.Width} × {Source.Height}" : "Source dimensions unknown")} · {(Source.IsHdr ? "HDR" : "SDR / unspecified")}\n" +
         (RtxSrConstructed ? $"RTX Super Resolution requested at {Scale:0.####}×" : Decision?.Detail == DetailImplementation.Conventional || Requested.UpscaleMode is "HighQuality" or "Automatic" or "RtxVsr" ? "High-quality conventional scaling" : "Source-faithful scaling") +
-        $" · {Decision?.Motion switch { MotionImplementation.CadenceCorrected => "Cadence corrected", MotionImplementation.BlendSmooth => "Temporal blend smoothing", _ => Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Original motion" } }} · PCM audio" +
+        $" · {Decision?.Motion switch { MotionImplementation.CadenceCorrected => "Cadence corrected", MotionImplementation.BlendSmooth => "Temporal blend smoothing", _ => Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Original motion" } }} · {(BitstreamPlanned ? "compressed audio passthrough requested" : "PCM audio")}" +
         (Reasons.IsEmpty ? "" : "\n" + string.Join("\n", Reasons));
 }
 
@@ -62,7 +64,7 @@ public static class PlaybackPlanBuilder
             !source.Known ? "Source dimensions unavailable; RTX SR was not enabled." : scale > 8 ? "Required scale exceeds the VPP limit; using conventional scaling." :
             "Source already matches output, is downscaled, or requires aspect correction; RTX SR is unnecessary.");
         if (options.RtxHdr && !hdr) reasons.Add("RTX HDR requires known SDR video and an enabled HDR display on a compatible path.");
-        if (bitstreamRequested) reasons.Add("Endpoint bitstream support is unverified; using PCM audio.");
+        if (bitstreamRequested) reasons.Add("Compressed audio passthrough is planned. HDMI connection, receiver support, and Atmos delivery are unverified.");
         // A Windows path parses as an absolute URI with a drive-letter scheme, so match the scheme, not the shape.
         if (!streamHelperAvailable && items.Any(x => Uri.TryCreate(x, UriKind.Absolute, out var link) && link.Scheme is "http" or "https"))
             reasons.Add("yt-dlp was not found, so site pages cannot be resolved. Direct media links still play.");
@@ -71,7 +73,7 @@ public static class PlaybackPlanBuilder
         args.Add("--profile=" + (options.Profile == "Automatic" ? "reference" : options.Profile.ToLowerInvariant()));
         string renderer = compatible ? "Compatibility D3D11" : rtxLane ? "RTX D3D11" : capabilities.Nvidia ? "NVIDIA Vulkan" : "Managed Vulkan";
         if (!compatible && !rtxLane && capabilities.Nvidia) args.Add("--profile=nvidia");
-        args.Add("--profile=pcm-safe");
+        args.Add(bitstreamRequested ? "--profile=hdmi-bitstream" : "--profile=pcm-safe");
         args.Add("--vo=gpu-next");
         args.Add("--input-ipc-server=\\\\.\\pipe\\" + pipeName);
         args.Add("--terminal=no");
@@ -125,7 +127,7 @@ public static class PlaybackPlanBuilder
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);
         return new(executable, args.ToImmutable(), options, source, target, renderer, sr, hdr, scale, reasons.ToImmutable(), pipeName,
-            intent, decision);
+            intent, decision, bitstreamRequested, bitstreamRequested);
     }
 }
 

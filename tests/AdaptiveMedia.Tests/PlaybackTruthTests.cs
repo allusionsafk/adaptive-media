@@ -50,6 +50,30 @@ internal static class PlaybackTruthTests
         var rtxPlan = Plan(new(true, true, "NVIDIA GeForce RTX 4080", Rtx: true));
         var noRtxPlan = Plan(new(true, false));
 
+        var audioPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["film.mkv"],
+            new("Reference", "Off", "Off", false, false), Source1080 with { AudioCodec = "eac3" },
+            new(1920, 1080), new(false, false), "audio-truth", bitstreamRequested: true);
+        var audioPending = PlaybackTruthBuilder.Build(Attempt(1, audioPlan), [], []);
+        Check(Has(audioPending.Requested, "Compressed audio passthrough") &&
+              Has(audioPending.Planned, "Compressed audio passthrough") &&
+              !Has(audioPending.Observed, "Compressed audio"),
+            "bitstream request and plan never become observed without runtime output");
+        var audioObserved = PlaybackTruthBuilder.Build(Attempt(1, audioPlan,
+            json: """{"audio-out-params":{"format":"spdif-eac3"},"current-ao":"wasapi"}"""), [], []);
+        Check(Has(audioObserved.Observed, "Compressed audio output") &&
+              Has(audioObserved.Observed, "HDMI transport and Atmos unverified") &&
+              !Has(audioObserved.Observed, "HDMI active") && !Has(audioObserved.Observed, "Atmos active"),
+            "compressed player output is observed without claiming HDMI or Atmos");
+        var userStart = audioPlan with { UserResumeAt = 42 };
+        var userTruth = PlaybackTruthBuilder.Build(Attempt(1, userStart), [], []);
+        Check(Has(userTruth.Requested, "User resume") && Has(userTruth.Planned, "User resume") &&
+              !Has(userTruth.Planned, "Automatic recovery resume"),
+            "a user resume is labelled as the user's choice");
+        var recoveryStart = userStart with { UserResumeAt = null, RecoveryResumeAt = 38 };
+        var recoveryTruth = PlaybackTruthBuilder.Build(Attempt(2, recoveryStart), [], []);
+        Check(Has(recoveryTruth.Planned, "Automatic recovery resume") && !Has(recoveryTruth.Planned, "User resume"),
+            "an automatic recovery point cannot masquerade as a user resume");
+
         // 1. RTX requested, conventional fallback planned: Requested says RTX; Planned and Observed do not.
         {
             var t = PlaybackTruthBuilder.Build(Attempt(1, noRtxPlan, json: """{"hwdec-current":"nvdec","gpu-api":"vulkan","current-vo":"gpu-next","vf":[]}""", playing: true), [], []);
@@ -134,8 +158,9 @@ internal static class PlaybackTruthTests
         {
             var nativePlan = Plan(new(false, false));
             var none = PlaybackTruthBuilder.Build(Attempt(1, nativePlan, PlaybackAttemptKind.NativeCurrent, fel: true), [], []);
-            Check(Has(none.Requested, "full enhancement layer") && Has(none.Planned, "Full enhancement-layer composition requested"),
-                "FEL requested and planned");
+            Check(Has(none.Requested, "enhancement-layer composition requested") && !Has(none.Requested, "FEL") &&
+                  Has(none.Planned, "Enhancement-layer composition requested"),
+                "an enabled native lane requests composition without classifying the source as FEL");
             Check(!Has(none.Observed, "FEL") && Has(none.Observed, "Composition not yet observed"), "no evidence: no FEL claim");
             var baseOnly = PlaybackTruthBuilder.Build(Attempt(1, nativePlan, PlaybackAttemptKind.NativeCurrent, native: BaseOnly, fel: true), [], []);
             Check(!Has(baseOnly.Observed, "FEL") && Has(baseOnly.Observed, "Base layer only"), "base-layer evidence: no FEL claim");

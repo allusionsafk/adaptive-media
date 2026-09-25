@@ -66,7 +66,28 @@ try {
     Check(canonical.AutomaticGoal=="BalancedImprovement" && canonical.EnhancedDetail=="Balanced" &&
           canonical.EnhancedMotion=="Original" && canonical.EnhancedCleanup=="Balanced",
         "newly saved settings retain safe semantic defaults");
+    // MPC-BE has no qualified launch path in this build. A saved legacy opt-in
+    // must not remain an apparently active setting after loading or saving.
+    Write("{\"MpcFallback\":true}");
+    Check(!SettingsStore.Load().MpcFallback, "legacy MPC-BE request is disabled until fallback is available");
+    var unavailable = new AppSettings { MpcFallback = true };
+    Check(SettingsStore.Save(unavailable) && !SettingsStore.Load().MpcFallback,
+        "saving cannot preserve an inert MPC-BE opt-in");
     Check(SettingsStore.LastWarning==null, "successful operation clears stale warning");
+    var source = new MediaInfo(1920, 1080, AudioCodec: "eac3");
+    var output = new PlaybackTarget(1920, 1080);
+    var playback = new PlaybackOptions("Reference", "Off", "Off", false, false);
+    PlaybackPlan AudioPlan(bool requested) => PlaybackPlanBuilder.Build("mpv.exe", "config", ["film.mkv"],
+        playback, source, output, new(false, false), "audio-test", bitstreamRequested: requested);
+    var pcm = AudioPlan(false);
+    var compressed = AudioPlan(true);
+    Check(pcm.Arguments.Contains("--profile=pcm-safe") && !pcm.Arguments.Contains("--profile=hdmi-bitstream"),
+        "bitstream off selects PCM profile");
+    Check(compressed.Arguments.Contains("--profile=hdmi-bitstream") && !compressed.Arguments.Contains("--profile=pcm-safe"),
+        "bitstream on materially selects compressed audio profile");
+    Check(compressed.BitstreamRequested && compressed.BitstreamPlanned &&
+          compressed.Reasons.Any(x => x.Contains("unverified", StringComparison.OrdinalIgnoreCase)),
+        "requested bitstream is planned without claiming HDMI endpoint support");
     Console.WriteLine($"Settings tests: {count} PASS");
 } catch (Exception error) { Console.Error.WriteLine(JsonSerializer.Serialize(new { status="failed", error=error.ToString() })); Environment.ExitCode = 1; } finally { Environment.SetEnvironmentVariable("ADAPTIVE_MEDIA_DATA_DIR",null); Directory.Delete(root,true); }
 

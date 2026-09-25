@@ -2,7 +2,7 @@
 
 Adaptive Media is a Windows 11 media player focused on dependable playback with optional enhancement controls.
 
-The application is built with .NET 10 WPF and uses mpv, gpu-next, libplacebo, FFmpeg, and an MPC-BE fallback. Reference playback is the default. Scaling, motion smoothing, debanding, RTX Video Super Resolution, and RTX Video HDR are explicit user choices.
+The application is built with .NET 10 WPF and uses mpv, gpu-next, libplacebo, and FFmpeg. Reference playback is the default. Scaling, motion smoothing, debanding, RTX Video Super Resolution, and RTX Video HDR are explicit user choices. Automatic MPC-BE fallback is unavailable in this build.
 
 [Documentation](docs/README.md) | [Support](SUPPORT.md) | [Security](SECURITY.md) | [Contributing](CONTRIBUTING.md)
 
