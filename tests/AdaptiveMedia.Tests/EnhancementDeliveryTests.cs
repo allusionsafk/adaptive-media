@@ -119,7 +119,7 @@ internal static class EnhancementDeliveryTests
             int plans = 0;
             foreach (var o in options)
             foreach (var cap in caps)
-            foreach (var target in new[] { Window, Window with { HdrEnabled = true }, new PlaybackTarget(640, 360) })
+            foreach (var target in new[] { Window, Window with { Display = new(HdrSupported: true, HdrActive: true, ActiveColorMode: "HDR", DxgiColorSpace: 12) }, new PlaybackTarget(640, 360) })
             {
                 var plan = Plan(o, cap, target: target);
                 var echo = new Dictionary<string, JsonElement>();

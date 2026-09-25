@@ -26,7 +26,7 @@ public sealed class AppSettings
     public const int CurrentSchemaVersion = 1;
     public int SchemaVersion { get; set; } = 1;
     public string Profile { get; set; } = "Automatic";
-    public bool AutoHdrSwitch { get; set; } = true;
+    public bool AutoHdrSwitch { get; set; } = false;
     public bool PreferExternalDisplay { get; set; } = true;
     public bool FullscreenExternal { get; set; } = true;
     public bool HdmiBitstream { get; set; } = false;

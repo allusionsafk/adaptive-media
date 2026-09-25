@@ -90,6 +90,8 @@ internal static class SettingsStore
         // There is no qualified external-player launch path in this build. Do not
         // preserve a legacy value that the product cannot act on.
         settings.MpcFallback = false;
+        // No qualified target-bound restore transaction exists in this build.
+        settings.AutoHdrSwitch = false;
         string Choice(string? value, string fallback, string name, params string[] choices)
         {
             var match = choices.FirstOrDefault(c => string.Equals(c, value, StringComparison.OrdinalIgnoreCase));

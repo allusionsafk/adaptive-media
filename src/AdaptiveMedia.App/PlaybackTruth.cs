@@ -7,7 +7,7 @@ namespace AdaptiveMedia;
 /// to plain facts so the truth surface does not depend on the native lane. Built
 /// only from that attempt's own observation.</summary>
 public sealed record NativeCompositionFacts(bool RendererActive, int DecoderInstances, bool BaseAndEnhancementPaired,
-    bool FelComposed, string Delivered, string? HardwareDecoder);
+    bool FelComposed, string Delivered, string? HardwareDecoder, bool RpuProcessed = false);
 
 /// <summary>Everything one attempt established, and nothing it did not. Owned by
 /// exactly one attempt: a replacement gets a new instance, so evidence cannot
@@ -20,6 +20,7 @@ public sealed class PlaybackAttemptEvidence
     private bool _finished;
     private NativeCompositionFacts? _native;
     private PlaybackHealthSnapshot? _health;
+    private DisplayCapability? _observedDisplay;
     private Func<PlaybackHealthSnapshot>? _liveHealth;
 
     public PlaybackAttemptEvidence(long attemptId, int number, PlaybackPlan plan, PlaybackAttemptKind kind, string runtime,
@@ -57,6 +58,13 @@ public sealed class PlaybackAttemptEvidence
     public void TrackHealth(Func<PlaybackHealthSnapshot> live) { lock (_gate) _liveHealth = live; }
 
     public void Finish(PlaybackHealthSnapshot? health) { lock (_gate) { _health = health; _liveHealth = null; _finished = true; } }
+
+    public void ObserveDisplay(DisplayCapability? display)
+    {
+        lock (_gate) if (!_finished) _observedDisplay = display;
+    }
+
+    public DisplayCapability? ObservedDisplay { get { lock (_gate) return _observedDisplay; } }
 
     /// <summary>Whether each path this attempt's own plan asked for was delivered,
     /// judged only from this attempt's own runtime evidence.</summary>
@@ -132,7 +140,8 @@ public static class PlaybackTruthBuilder
         var intent = IntentLines(current.Plan);
         var requested = Requested(current);
         var planned = Planned(current);
-        var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started, delivery);
+        var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started, delivery,
+            current.ObservedDisplay);
         var fallbackLines = delivery.Where(v => v.State == DeliveryState.FellBack).Select(v => v.Label + " → " + v.Evidence).ToList();
         if (fallbackLines.Count == 0) fallbackLines.Add("None observed");
         var healthLines = new List<string> { HealthText.Describe(health?.State ?? SustainedPlaybackHealth.Starting) };
@@ -253,7 +262,11 @@ public static class PlaybackTruthBuilder
         {
             lines.Add("NVIDIA D3D11 VPP");
             if (plan.RtxSrConstructed) lines.Add($"RTX Super Resolution at {plan.Scale.ToString("0.###", CultureInfo.InvariantCulture)}×");
-            if (plan.RtxHdrConstructed) lines.Add("RTX Video HDR");
+            if (plan.RtxHdrConstructed)
+            {
+                lines.Add("RTX Video HDR");
+                lines.Add("NVIDIA driver support pending runtime negotiation; frame processing is not directly observable");
+            }
         }
         string? vo = Argument(plan, "--vo");
         string? api = Argument(plan, "--gpu-api");
@@ -268,6 +281,12 @@ public static class PlaybackTruthBuilder
         if (Argument(plan, "--deband") == "yes") lines.Add("Banding reduction (deband)");
         if (plan.BitstreamPlanned) lines.Add("Compressed audio passthrough for supported source codecs; endpoint unverified");
         else if (plan.BitstreamRequested) lines.Add("PCM audio; compressed passthrough unavailable on this runtime");
+        if (plan.Color is { } color)
+            lines.Add(color.ToneMapToSdr ? "HDR source → SDR renderer target (tone mapping planned)" :
+                plan.RtxHdrConstructed ? "Known SDR → RTX Video HDR renderer target requested; processing and output await observation" :
+                color.RendererTarget is ColorDelivery.Pq or ColorDelivery.Hlg or ColorDelivery.Hdr10 ? "Source HDR preserved on planned HDR renderer path" :
+                color.RendererTarget == ColorDelivery.Unknown ? "Renderer color target unclassified; output awaits observation" :
+                "SDR renderer target planned");
         if (plan.RecoveryResumeAt is double recoveryAt)
             lines.Add("Automatic recovery resume near " + PlaybackRecoveryText.Position(recoveryAt));
         else if (plan.UserResumeAt is double userAt)
@@ -298,13 +317,15 @@ public static class PlaybackTruthBuilder
     /// reported through their delivery verdicts, which come from runtime evidence;
     /// the ones that fell back are listed under Fallback instead.</summary>
     public static List<string> Observed(PlaybackPlan plan, IReadOnlyDictionary<string, JsonElement> observed,
-        NativeCompositionFacts? native, bool nativeAttempt, bool started, IReadOnlyList<DeliveryVerdict>? delivery = null)
+        NativeCompositionFacts? native, bool nativeAttempt, bool started, IReadOnlyList<DeliveryVerdict>? delivery = null,
+        DisplayCapability? observedDisplay = null)
     {
         var lines = new List<string>();
         if (!started) { lines.Add("Nothing observed: the player did not start."); return lines; }
         delivery ??= [];
         if (nativeAttempt)
         {
+            if (native?.RpuProcessed == true) lines.Add("Dolby Vision RPU metadata processing observed");
             if (native is null || !native.RendererActive) lines.Add("Composition not yet observed");
             else if (native.FelComposed)
             {
@@ -312,6 +333,7 @@ public static class PlaybackTruthBuilder
                 lines.Add("FEL composition observed");
             }
             else lines.Add(native.Delivered == "BaseLayerOnly" ? "Base layer only; the enhancement layer was not composed" : "Composition unknown");
+            lines.Add("Dolby Vision display signalling unverified; renderer and metadata evidence do not establish proprietary display mode");
         }
         if (observed.Count > 0)
         {
@@ -337,7 +359,28 @@ public static class PlaybackTruthBuilder
         if (Size(observed, "osd-dimensions") is { } osd) lines.Add($"{osd.W}×{osd.H} output");
         if (observed.TryGetValue("video-target-params", out var target) && target.ValueKind == JsonValueKind.Object &&
             target.TryGetProperty("gamma", out var gamma) && gamma.ValueKind == JsonValueKind.String)
-            lines.Add(gamma.GetString() is "pq" or "hlg" ? "HDR output (" + gamma.GetString()!.ToUpperInvariant() + ")" : "SDR output");
+        {
+            if (gamma.GetString() is "pq" or "hlg")
+            {
+                string transfer = gamma.GetString()!.ToUpperInvariant();
+                lines.Add("Renderer target " + transfer + "; " +
+                    (observedDisplay?.WindowsHdrPathActive == true
+                        ? "Windows HDR active on the matched target (read-only query); physical display output unmeasured"
+                        : "display HDR state unverified; physical display output unmeasured"));
+            }
+            else lines.Add("SDR output reported by renderer; physical display output unmeasured");
+        }
+        if (observedDisplay is { } display &&
+            (!observed.TryGetValue("video-target-params", out var transferParams) ||
+             transferParams.ValueKind != JsonValueKind.Object ||
+             !transferParams.TryGetProperty("gamma", out var outputGamma) ||
+             outputGamma.ValueKind != JsonValueKind.String ||
+             outputGamma.GetString() is not ("pq" or "hlg")))
+            lines.Add(display.WindowsHdrPathActive
+                ? "Windows HDR active on the matched target (read-only query); physical display output unmeasured"
+                : display.HdrActive == false
+                    ? "Windows HDR inactive on the matched target (read-only query); physical display output unmeasured"
+                    : "Windows HDR state unverified on the matched target; physical display output unmeasured");
         if (observed.TryGetValue("estimated-display-fps", out var fps) && fps.ValueKind == JsonValueKind.Number && fps.GetDouble() > 0)
             lines.Add($"Display ~{fps.GetDouble():0} Hz");
         if (observed.TryGetValue("audio-out-params", out var audio) && audio.ValueKind == JsonValueKind.Object &&

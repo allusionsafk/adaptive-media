@@ -17,7 +17,7 @@ var system = new SystemSummary { MpvPath = mpv, HasNvidia = true, NvidiaAdapter 
 var settings = new AppSettings { AutoHdrSwitch = false, NativeDolbyVisionLane = false };
 // A windowed 2048×1152 output on the laptop's 240 Hz panel, so a 540p source is
 // really upscaled and a 25 fps source really needs cadence correction.
-var target = new PlaybackTarget(2048, 1152, 0, false, false, 240);
+var target = new PlaybackTarget(2048, 1152, 0, false, 240);
 var json = new JsonSerializerOptions { WriteIndented = true };
 var failures = new List<string>();
 var results = new List<object>();

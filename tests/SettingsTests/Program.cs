@@ -10,6 +10,9 @@ void Write(string text) => File.WriteAllText(SettingsStore.PathName, text);
 try {
     if (args.Contains("--verify-failure-reporting")) throw new InvalidOperationException("Intentional harness failure-reporting check");
     Check(SettingsStore.DirectoryPath == root, "isolated data directory");
+    Check(!new AppSettings().AutoHdrSwitch, "Unavailable HDR switching defaults off");
+    Write("{\"AutoHdrSwitch\":true}");
+    Check(!SettingsStore.Load().AutoHdrSwitch, "Legacy HDR switch request is normalized off");
     Write("{\"Profile\":\"Enhanced\",\"AutoHdrSwitch\":false,\"DefaultUpscaleMode\":\"RtxVsr\",\"DefaultMotionMode\":\"Smooth\",\"DefaultCleanupMode\":\"Strong\",\"ExtraOption\":{\"keep\":true}}");
     var legacy=SettingsStore.Load();
     Check(legacy.Profile=="Enhanced" && !legacy.AutoHdrSwitch && legacy.DefaultUpscaleMode=="RtxVsr", "legacy choices preserved");
@@ -36,7 +39,7 @@ try {
         "semantic repair warning names only invalid fields");
     Write("{\"Profile\":\"Reference\",\"AutoHdrSwitch\":\"oops\",\"HdmiBitstream\":true}");
     var badType=SettingsStore.Load();
-    Check(badType.Profile=="Reference" && badType.AutoHdrSwitch && badType.HdmiBitstream, "invalid type does not discard valid fields");
+    Check(badType.Profile=="Reference" && !badType.AutoHdrSwitch && badType.HdmiBitstream, "invalid type does not discard valid fields");
     Write("{broken");
     Check(SettingsStore.Load().Profile=="Automatic" && SettingsStore.LastWarning!=null, "corrupt file handled");
     Check(File.ReadAllText(SettingsStore.PathName)=="{broken", "load preserves corrupt bytes");
