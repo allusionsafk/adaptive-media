@@ -29,7 +29,7 @@ public sealed class PlaybackTransitionObserver
         return PlaybackTransitionRecovery.Classify(playerError, power, displayChanged);
     }
 
-    private static PlaybackPowerSnapshot? CapturePower()
+    internal static PlaybackPowerSnapshot? CapturePower()
     {
         if (!OperatingSystem.IsWindows()) return null;
         try

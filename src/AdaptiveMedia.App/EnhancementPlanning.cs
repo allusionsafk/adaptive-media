@@ -61,7 +61,7 @@ public sealed class EnhancementDecision : IEquatable<EnhancementDecision>
     {
         Profile = Intent.Mode.ToString(),
         UpscaleMode = Detail switch { DetailImplementation.NvidiaVpp => "RtxVsr", DetailImplementation.Conventional => "HighQuality", _ => "Off" },
-        MotionMode = Motion switch { MotionImplementation.CadenceCorrected => "Cadence", MotionImplementation.BlendSmooth => "Smooth", _ => "Off" },
+        MotionMode = Motion switch { MotionImplementation.CadenceCorrected => "Cadence", MotionImplementation.BlendSmooth => "Smooth", MotionImplementation.GeneratedMotion => "Generated", _ => "Off" },
         Cleanup = Cleanup != CleanupImplementation.Off,
         CleanupMode = Cleanup switch { CleanupImplementation.Gentle => "Gentle", CleanupImplementation.Balanced => "Normal", CleanupImplementation.Strong => "Strong", _ => "Off" },
         Intent = Intent,
@@ -262,6 +262,13 @@ public static class EnhancementPlanner
                 ? "Source cadence preserved because it already maps cleanly to the measured display refresh."
                 : "Source cadence preserved conservatively because the display refresh rate is unknown.");
             return MotionImplementation.Original;
+        }
+        // Generated Motion is experimental. Automatic may ask for stronger smoothing,
+        // but only an explicit Enhanced choice may put the FRUC runtime on screen.
+        if (intent.Mode == EnhancementMode.Automatic && requested is MotionIntent.GeneratedMotion or MotionIntent.NeuralMotion)
+        {
+            reasons.Add("Temporal blend smoothing selected; Automatic does not use experimental Generated Motion, which must be chosen explicitly in Enhanced.");
+            return MotionImplementation.BlendSmooth;
         }
         if (requested == MotionIntent.NeuralMotion && environment.NeuralMotionAvailable)
         {
