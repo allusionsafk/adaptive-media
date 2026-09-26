@@ -176,7 +176,16 @@ public static class NativeDvPlaybackPlanner
         if (target?.Display?.WindowsHdrPathActive != true)
         {
             args.Add("--target-trc=bt.1886");
-            args.Add("--target-prim=bt.709");
+            if (target?.Display?.QualifiedWcgPeakNits is int peak && gpuApi == "d3d11" && gpuContext == "d3d11")
+            {
+                args.Add("--target-prim=display-p3");
+                args.Add("--target-peak=" + peak.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                args.Add("--hdr-reference-white=" + peak.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                args.Add("--tone-mapping=mobius");
+                args.Add("--d3d11-output-format=rgba16f");
+                args.Add("--d3d11-output-csp=linear");
+            }
+            else args.Add("--target-prim=bt.709");
         }
         args.Add("--hwdec=" + hardwareDecoder);
         args.Add("--gpu-api=" + gpuApi);

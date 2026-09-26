@@ -9,6 +9,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" Link="EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealth.cs" Link="PlaybackHealth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackRecovery.cs" Link="PlaybackRecovery.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackTransitionRecovery.cs" Link="PlaybackTransitionRecovery.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackTruth.cs" Link="PlaybackTruth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementDelivery.cs" Link="EnhancementDelivery.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealthMonitor.cs" Link="PlaybackHealthMonitor.cs" />

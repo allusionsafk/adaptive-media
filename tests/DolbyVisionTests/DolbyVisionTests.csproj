@@ -20,6 +20,10 @@
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackHealthMonitor.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackRecovery.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackTransitionRecovery.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackTransitionObserver.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/CinemaBoostPolicy.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/CinemaBoostService.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackTruth.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementDelivery.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SessionDiagnostics.cs" />

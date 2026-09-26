@@ -50,7 +50,55 @@ internal static class PlaybackTruthTests
         var rtxPlan = Plan(new(true, true, "NVIDIA GeForce RTX 4080", Rtx: true));
         var noRtxPlan = Plan(new(true, false));
 
-        var smartPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["cinema.mkv"],
+        var wcgDisplay = new DisplayCapability(SourceName: @"\\.\DISPLAY17",
+            PnpId: @"DISPLAY\BOE0C4B\5&39391d08&1&UID4354", AdapterLow: 3153274647,
+            TargetId: 4354, EdidFingerprint: "1B5EAD2BDE875922DC92150000696F1AC51203F92B57865EBC7C1928F642B39C",
+            HdrSupported: false, HdrActive: false, WcgSupported: true, WcgActive: true,
+            AdvancedColorActive: true, ActiveColorMode: "WCG", BitsPerColor: 10, DxgiColorSpace: 0,
+            ReportedMaxLuminance: 270, RedPrimary: [0.68066406f, 0.31445312f],
+            GreenPrimary: [0.27148438f, 0.6894531f], BluePrimary: [0.15039062f, 0.044921875f]);
+        var wcgPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["hdr.mkv"],
+            new("Automatic", "Off", "Off", false, false), Source1080 with { Transfer = "pq", Primaries = "bt.2020" },
+            new(2560, 1600, Display: wcgDisplay), new(true, true, Rtx: true), "wcg-truth");
+        var wcgEvidence = Attempt(500, wcgPlan, json: """
+            {"video-target-params":{"gamma":"scrgb","pixelformat":"rgba16hf","max-luma":270,
+              "prim-red-x":0.680664,"prim-red-y":0.314453,"prim-green-x":0.271484,"prim-green-y":0.689453,
+              "prim-blue-x":0.150391,"prim-blue-y":0.044922},"hwdec-current":"d3d11va"}
+            """);
+        wcgEvidence.ObserveDisplay(wcgDisplay);
+        wcgEvidence.ObserveBrightness(new PanelBrightnessObservation(80, 100));
+        var wcgTruth = PlaybackTruthBuilder.Build(wcgEvidence, [], []);
+        Check(Has(wcgTruth.Planned, "High-luminance wide-gamut SDR") &&
+              Has(wcgTruth.Observed, "High-luminance wide-gamut SDR") &&
+              Has(wcgTruth.Observed, "panel brightness 80% → 100%") &&
+              !Has(wcgTruth.Observed, "HDR10 output") && !Has(wcgTruth.Observed, "Dolby Vision display output"),
+            "WCG output requires matched active display and observed scRGB FP16 renderer, never HDR or DV signalling");
+        var staleWcg = Attempt(501, wcgPlan, json: """
+            {"video-target-params":{"gamma":"scrgb","pixelformat":"rgba16hf","max-luma":270,
+              "prim-red-x":0.680664,"prim-red-y":0.314453,"prim-green-x":0.271484,"prim-green-y":0.689453,
+              "prim-blue-x":0.150391,"prim-blue-y":0.044922}}
+            """);
+        staleWcg.ObserveDisplay(wcgDisplay with { TargetId = 99 });
+        Check(!Has(PlaybackTruthBuilder.Build(staleWcg, [], []).Observed, "High-luminance wide-gamut SDR"),
+            "A stale output path cannot donate WCG observation");
+        var malformedWcg = Attempt(502, wcgPlan, json: """
+            {"video-target-params":{"gamma":42,"pixelformat":"rgba16hf","max-luma":270}}
+            """);
+        malformedWcg.ObserveDisplay(wcgDisplay);
+        Check(!Has(PlaybackTruthBuilder.Build(malformedWcg, [], []).Observed, "High-luminance wide-gamut SDR"),
+            "Malformed renderer evidence cannot authorize WCG output or crash truth reporting");        var nativeWcgEvidence = Attempt(503, wcgPlan, PlaybackAttemptKind.NativeCurrent, json: """
+            {"video-target-params":{"gamma":"scrgb","pixelformat":"rgba16hf","max-luma":270,
+              "prim-red-x":0.680664,"prim-red-y":0.314453,"prim-green-x":0.271484,"prim-green-y":0.689453,
+              "prim-blue-x":0.150391,"prim-blue-y":0.044922},"hwdec-current":"d3d11va"}
+            """, native: Fel with { RpuProcessed = true }, fel: true);
+        nativeWcgEvidence.ObserveDisplay(wcgDisplay);
+        var nativeWcgTruth = PlaybackTruthBuilder.Build(nativeWcgEvidence, [], []);
+        Check(Has(nativeWcgTruth.Observed, "Dolby Vision RPU metadata processing observed") &&
+              Has(nativeWcgTruth.Observed, "FEL composition observed") &&
+              Has(nativeWcgTruth.Observed, "Output: High-luminance wide-gamut SDR") &&
+              Has(nativeWcgTruth.Observed, "Dolby Vision display signalling unverified") &&
+              !Has(nativeWcgTruth.Observed, "Dolby Vision display output"),
+            "Native FEL composition and WCG SDR output remain separate from proprietary DV display signalling");        var smartPlan = PlaybackPlanBuilder.Build("mpv.exe", "config", ["cinema.mkv"],
             new("Enhanced", "Off", "Off", false, false, FitMode: "SmartFill"),
             Source1080 with { Height = 800 }, new(2560, 1440), new(false, false), "smart-fit-truth");
         var smartClaim = PlaybackTruthBuilder.Build(Attempt(401, smartPlan,

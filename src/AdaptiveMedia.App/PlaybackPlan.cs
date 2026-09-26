@@ -56,6 +56,11 @@ public static class PlaybackPlanBuilder
         if (decision is not null) reasons.AddRange(decision.Reasons);
         if (options.AutoHdrSwitch) reasons.Add("Automatic Windows HDR switching is unavailable; the current display state is preserved.");
         var color = DisplayColorPolicy.Decide(source, target.Display);
+        // Compatibility deliberately keeps the conventional SDR path. It must
+        // remain a distinct surviving plan after a color or GPU failure.
+        if (options.Profile == "Compatibility" && color.TargetPeakNits is not null)
+            color = color with { TargetPeakNits = null,
+                Reason = "Compatibility mode uses conventional SDR color management." };
         double scale = FitScale(source, target);
         bool fitRequested = options.FitMode == "SmartFill";
         double sourceAspect = source.Aspect > 0 ? source.Aspect : source.Known ? (double)source.Width / source.Height : 0;
@@ -76,6 +81,7 @@ public static class PlaybackPlanBuilder
             Reason = "Known SDR and a verified active HDR target permit an RTX Video HDR request; driver acceptance, frame processing, and physical presentation remain unverified." };
         reasons.Add(color.Reason);
         bool rtxLane = eligible && (rtxRequested || hdr);
+        bool wcgLane = color.TargetPeakNits is not null;
         if (rtxRequested && !sr) reasons.Add(!eligible ? "No compatible RTX processing path is available; using conventional scaling." :
             !source.Known ? "Source dimensions unavailable; RTX SR was not enabled." : scale > 8 ? "Required scale exceeds the VPP limit; using conventional scaling." :
             "Source already matches output, is downscaled, or requires aspect correction; RTX SR is unnecessary.");
@@ -87,8 +93,8 @@ public static class PlaybackPlanBuilder
         var args = ImmutableArray.CreateBuilder<string>();
         args.Add("--config-dir=" + configDir);
         args.Add("--profile=" + (options.Profile == "Automatic" ? "reference" : options.Profile.ToLowerInvariant()));
-        string renderer = compatible ? "Compatibility D3D11" : rtxLane ? "RTX D3D11" : capabilities.Nvidia ? "NVIDIA Vulkan" : "Managed Vulkan";
-        if (!compatible && !rtxLane && capabilities.Nvidia) args.Add("--profile=nvidia");
+        string renderer = compatible ? "Compatibility D3D11" : rtxLane ? "RTX D3D11" : wcgLane ? "Color-managed WCG D3D11" : capabilities.Nvidia ? "NVIDIA Vulkan" : "Managed Vulkan";
+        if (!compatible && !rtxLane && !wcgLane && capabilities.Nvidia) args.Add("--profile=nvidia");
         args.Add(bitstreamRequested ? "--profile=hdmi-bitstream" : "--profile=pcm-safe");
         args.Add("--vo=gpu-next");
         args.Add("--target-colorspace-hint=auto");
@@ -96,7 +102,18 @@ public static class PlaybackPlanBuilder
         if (target.Display?.WindowsHdrPathActive != true)
         {
             args.Add("--target-trc=bt.1886");
-            args.Add("--target-prim=bt.709");
+            if (color.TargetPeakNits is int peak)
+            {
+                args.Add("--target-prim=display-p3");
+                args.Add("--target-peak=" + peak.ToString(CultureInfo.InvariantCulture));
+                // mpv gives HDR reference white precedence over target-peak
+                // for an SDR transfer. Set both to the same evidenced value.
+                args.Add("--hdr-reference-white=" + peak.ToString(CultureInfo.InvariantCulture));
+                args.Add("--tone-mapping=mobius");
+                args.Add("--d3d11-output-format=rgba16f");
+                args.Add("--d3d11-output-csp=linear");
+            }
+            else args.Add("--target-prim=bt.709");
         }
         args.Add("--input-ipc-server=\\\\.\\pipe\\" + pipeName);
         args.Add("--terminal=no");
@@ -112,10 +129,11 @@ public static class PlaybackPlanBuilder
             }
             else args.Add($"--autofit={target.Width}x{target.Height}");
         }
-        if (rtxLane)
+        if (rtxLane || wcgLane)
         {
             args.Add("--gpu-api=d3d11"); args.Add("--gpu-context=d3d11"); args.Add("--hwdec=d3d11va");
-            if (!string.IsNullOrWhiteSpace(capabilities.NvidiaAdapter)) args.Add("--d3d11-adapter=" + capabilities.NvidiaAdapter);
+            string? adapter = wcgLane ? target.Display?.DxgiAdapter : capabilities.NvidiaAdapter;
+            if (!string.IsNullOrWhiteSpace(adapter)) args.Add("--d3d11-adapter=" + adapter);
             var filter = new List<string>();
             if (sr) { filter.Add("scale=" + scale.ToString("0.######", CultureInfo.InvariantCulture)); filter.Add("scaling-mode=nvidia"); }
             if (hdr) filter.Add("nvidia-true-hdr=yes");
@@ -153,7 +171,7 @@ public static class PlaybackPlanBuilder
             args.AddRange(new string[] { "--video-sync=display-resample", "--video-sync-max-factor=10" });
             if (options.MotionMode != "Cadence")
                 args.AddRange(new string[] { "--interpolation=yes", "--tscale=" + (options.MotionMode == "Gentle" ? "oversample" : "linear") });
-            if (!compatible && !rtxLane) args.Add("--vulkan-swap-mode=fifo");
+            if (!compatible && !rtxLane && !wcgLane) args.Add("--vulkan-swap-mode=fifo");
         }
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);

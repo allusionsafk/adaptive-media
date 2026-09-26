@@ -26,6 +26,9 @@ try {
     Invoke-Gate 'Settings assertions' {
         dotnet run --project tests/SettingsTests/SettingsTests.csproj -c Release
     }
+    Invoke-Gate 'Cinema Boost assertions' {
+        dotnet run --project tests/CinemaBoostTests/CinemaBoostTests.csproj -c Release
+    }
     Invoke-Gate 'Public identity assertions' {
         & (Join-Path $root 'tests/Test-PublicIdentity.ps1')
     }
