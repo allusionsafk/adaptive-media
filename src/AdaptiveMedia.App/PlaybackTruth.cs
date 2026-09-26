@@ -289,9 +289,16 @@ public static class PlaybackTruthBuilder
         string? api = Argument(plan, "--gpu-api");
         lines.Add((vo ?? "default renderer") + (api == "d3d11" ? " · Direct3D 11" : HasProfile(plan, "compatibility") ? " · Direct3D 11" : " · Vulkan"));
         if (Argument(plan, "--scale") is { } scale) lines.Add("libplacebo scaling (" + scale + ")");
+        bool generated = plan.Renderer == GeneratedMotionPolicy.Renderer;
+        if (generated)
+            lines.Add("Generated Motion: NVIDIA optical-flow FRUC to " +
+                (GeneratedMotionPolicy.TargetFps(plan.Source.Fps)?.ToString("0.###", CultureInfo.InvariantCulture) ?? "?") +
+                " fps in the experimental runtime; generated frames await observation");
         if (Argument(plan, "--video-sync") == "display-resample")
             lines.Add(Argument(plan, "--interpolation") != "yes"
                 ? "Cadence-corrected presentation (display-resample, no interpolation)"
+                : generated
+                    ? "Temporal blend smoothing (display-resample) between output frames; this blending is not frame generation"
                 : plan.Decision?.Motion == MotionImplementation.BlendSmooth
                     ? "Temporal blend smoothing (display-resample)"
                     : (Argument(plan, "--tscale") == "oversample" ? "Gentle" : "Smooth") + " motion (display-resample)");

@@ -26,7 +26,7 @@ public sealed record PlaybackPlan(string Executable, ImmutableArray<string> Argu
         System.Text.Encoding.UTF8.GetBytes(string.Join('\0', Arguments))));
     public string Summary => $"{(Source.Known ? $"{Source.Width} × {Source.Height}" : "Source dimensions unknown")} · {(Source.IsHdr ? "HDR" : "SDR / unspecified")}\n" +
         (RtxSrConstructed ? $"RTX Super Resolution requested at {Scale:0.####}×" : Decision?.Detail == DetailImplementation.Conventional || Requested.UpscaleMode is "HighQuality" or "Automatic" or "RtxVsr" ? "High-quality conventional scaling" : "Source-faithful scaling") +
-        $" · {Decision?.Motion switch { MotionImplementation.CadenceCorrected => "Cadence corrected", MotionImplementation.BlendSmooth => "Temporal blend smoothing", _ => Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Original motion" } }} · {(BitstreamPlanned ? "compressed audio passthrough requested" : "PCM audio")}" +
+        $" · {Decision?.Motion switch { MotionImplementation.CadenceCorrected => "Cadence corrected", MotionImplementation.BlendSmooth => "Temporal blend smoothing", MotionImplementation.GeneratedMotion => "Generated Motion (experimental)", _ => Requested.MotionMode switch { "Gentle" => "Gentle motion", "Smooth" => "Smooth motion", _ => "Original motion" } }} · {(BitstreamPlanned ? "compressed audio passthrough requested" : "PCM audio")}" +
         (Reasons.IsEmpty ? "" : "\n" + string.Join("\n", Reasons));
 }
 
@@ -37,23 +37,33 @@ public static class PlaybackPlanBuilder
 
     public static PlaybackPlan Build(string executable, string configDir, IReadOnlyList<string> items,
         PlaybackOptions options, MediaInfo source, PlaybackTarget target, PlaybackCapabilities capabilities,
-        string pipeName, bool bitstreamRequested = false, bool streamHelperAvailable = true)
+        string pipeName, bool bitstreamRequested = false, bool streamHelperAvailable = true,
+        GeneratedMotionBackend? generatedMotion = null, GeneratedMotionPower? power = null)
     {
         if (items.Count == 0) throw new ArgumentException("Choose at least one media file.");
         if (items.Any(x => string.IsNullOrWhiteSpace(x) || x.IndexOfAny(['\0', '\r', '\n']) >= 0))
             throw new ArgumentException("A media path contains an unsupported control character.");
         if (!new[] { "Automatic", "Reference", "Enhanced", "Compatibility" }.Contains(options.Profile) ||
             !new[] { "Off", "Automatic", "HighQuality", "RtxVsr" }.Contains(options.UpscaleMode) ||
-            !new[] { "Off", "Gentle", "Smooth", "Cadence" }.Contains(options.MotionMode) ||
+            !new[] { "Off", "Gentle", "Smooth", "Cadence", "Generated" }.Contains(options.MotionMode) ||
             !new[] { "Legacy", "Off", "Gentle", "Normal", "Strong", "Automatic" }.Contains(options.CleanupMode) ||
             !new[] { "Original", "SmartFill" }.Contains(options.FitMode))
             throw new ArgumentException("A playback setting is unavailable. Reset it in Settings.");
+        string? generatedUnavailable = GeneratedMotionPolicy.Unavailable(source, items.Count, capabilities, generatedMotion, power);
         EnhancementDecision? decision = options.Intent is null ? null : EnhancementPlanner.Decide(options.Intent,
-            new(source, target, capabilities, items.Count));
+            new(source, target, capabilities, items.Count, GeneratedMotionAvailable: generatedUnavailable is null));
         EnhancementIntent? intent = options.Intent;
         if (decision is not null) options = decision.ApplyTo(options);
         var reasons = ImmutableArray.CreateBuilder<string>();
         if (decision is not null) reasons.AddRange(decision.Reasons);
+        bool generatedRequested = options.MotionMode == "Generated" ||
+            intent is { Mode: EnhancementMode.Enhanced, Motion: MotionIntent.GeneratedMotion };
+        if (generatedRequested && generatedUnavailable is not null)
+            reasons.Add("Generated Motion is unavailable because " + generatedUnavailable + ".");
+        if (options.MotionMode == "Generated" && generatedUnavailable is not null) options = options with { MotionMode = "Smooth" };
+        bool generatedLane = options.MotionMode == "Generated";
+        double? generatedFps = generatedLane ? GeneratedMotionPolicy.TargetFps(source.Fps) : null;
+        if (generatedLane) executable = generatedMotion!.Executable;
         if (options.AutoHdrSwitch) reasons.Add("Automatic Windows HDR switching is unavailable; the current display state is preserved.");
         var color = DisplayColorPolicy.Decide(source, target.Display);
         // Compatibility deliberately keeps the conventional SDR path. It must
@@ -74,7 +84,10 @@ public static class PlaybackPlanBuilder
             : "Smart Fill is unavailable for this profile, playlist, HDR source, geometry, or aspect-corrected source; original framing is retained.");
         bool rtxRequested = options.UpscaleMode == "RtxVsr";
         bool compatible = options.Profile == "Compatibility";
-        bool eligible = capabilities.Nvidia && capabilities.Rtx && capabilities.Vpp && !compatible;
+        // Generated Motion owns the D3D11 video filter chain; RTX processing is not stacked on it.
+        bool eligible = capabilities.Nvidia && capabilities.Rtx && capabilities.Vpp && !compatible && !generatedLane;
+        if (generatedLane && (options.UpscaleMode == "RtxVsr" || options.RtxHdr))
+            reasons.Add("RTX Video processing is not combined with experimental Generated Motion.");
         bool sr = rtxRequested && eligible && source.Known && scale > 1.001 && scale <= 8;
         bool hdr = options.RtxHdr && eligible && source.Known && color.RtxVideoHdrEligible;
         if (hdr) color = color with { RendererTarget = ColorDelivery.Hdr10,
@@ -93,8 +106,8 @@ public static class PlaybackPlanBuilder
         var args = ImmutableArray.CreateBuilder<string>();
         args.Add("--config-dir=" + configDir);
         args.Add("--profile=" + (options.Profile == "Automatic" ? "reference" : options.Profile.ToLowerInvariant()));
-        string renderer = compatible ? "Compatibility D3D11" : rtxLane ? "RTX D3D11" : wcgLane ? "Color-managed WCG D3D11" : capabilities.Nvidia ? "NVIDIA Vulkan" : "Managed Vulkan";
-        if (!compatible && !rtxLane && !wcgLane && capabilities.Nvidia) args.Add("--profile=nvidia");
+        string renderer = compatible ? "Compatibility D3D11" : generatedLane ? GeneratedMotionPolicy.Renderer : rtxLane ? "RTX D3D11" : wcgLane ? "Color-managed WCG D3D11" : capabilities.Nvidia ? "NVIDIA Vulkan" : "Managed Vulkan";
+        if (!compatible && !rtxLane && !wcgLane && !generatedLane && capabilities.Nvidia) args.Add("--profile=nvidia");
         args.Add(bitstreamRequested ? "--profile=hdmi-bitstream" : "--profile=pcm-safe");
         args.Add("--vo=gpu-next");
         args.Add("--target-colorspace-hint=auto");
@@ -129,7 +142,19 @@ public static class PlaybackPlanBuilder
             }
             else args.Add($"--autofit={target.Width}x{target.Height}");
         }
-        if (rtxLane || wcgLane)
+        if (generatedLane)
+        {
+            // FRUC runs on the NVIDIA GPU's own D3D11 frames; decoding stays on the GPU.
+            args.Add("--gpu-api=d3d11"); args.Add("--gpu-context=d3d11"); args.Add("--hwdec=d3d11va");
+            if (!string.IsNullOrWhiteSpace(capabilities.NvidiaAdapter)) args.Add("--d3d11-adapter=" + capabilities.NvidiaAdapter);
+            args.Add(GeneratedMotionPolicy.FilterArgument(generatedFps!.Value));
+            // FRUC's CUDA work shares the GPU with presentation. A deeper swapchain
+            // absorbs those stalls: on the RTX 4080 at 240 Hz, depth 6 took delayed
+            // frames from 10-21 per 14 s to 0 and kept display-resample active.
+            args.Add("--swapchain-depth=6");
+            reasons.Add($"Generated Motion planned: NVIDIA optical-flow FRUC synthesizes intermediate frames to {generatedFps.Value.ToString("0.###", CultureInfo.InvariantCulture)} fps in the experimental runtime; whether frames are generated is reported after playback starts. Temporal blend smoothing remains the fallback.");
+        }
+        else if (rtxLane || wcgLane)
         {
             args.Add("--gpu-api=d3d11"); args.Add("--gpu-context=d3d11"); args.Add("--hwdec=d3d11va");
             string? adapter = wcgLane ? target.Display?.DxgiAdapter : capabilities.NvidiaAdapter;
@@ -170,8 +195,10 @@ public static class PlaybackPlanBuilder
         {
             args.AddRange(new string[] { "--video-sync=display-resample", "--video-sync-max-factor=10" });
             if (options.MotionMode != "Cadence")
+                // Generated Motion keeps the Smoother motion timing underneath, so a
+                // backend fallback degrades to blend smoothing without a relaunch.
                 args.AddRange(new string[] { "--interpolation=yes", "--tscale=" + (options.MotionMode == "Gentle" ? "oversample" : "linear") });
-            if (!compatible && !rtxLane && !wcgLane) args.Add("--vulkan-swap-mode=fifo");
+            if (!compatible && !rtxLane && !wcgLane && !generatedLane) args.Add("--vulkan-swap-mode=fifo");
         }
         if (!string.IsNullOrWhiteSpace(options.YtdlFormat)) { args.Add("--ytdl=yes"); args.Add("--ytdl-format=" + options.YtdlFormat); }
         args.Add("--"); args.AddRange(items);

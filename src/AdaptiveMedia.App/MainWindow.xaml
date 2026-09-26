@@ -191,6 +191,7 @@
                                 <ListBoxItem Content="Original" Tag="Original" ToolTip="Preserve the source's temporal samples."/>
                                 <ListBoxItem Content="Correct cadence" Tag="CadenceCorrected" ToolTip="Correct display cadence without blending neighbouring frames."/>
                                 <ListBoxItem Content="Smoother motion" Tag="BlendSmooth" ToolTip="Blend neighbouring frames for smoother motion. This is not generated or AI motion."/>
+                                <ListBoxItem Content="Generated Motion" Tag="GeneratedMotion" ToolTip="Experimental. NVIDIA optical flow synthesizes new frames between source frames on eligible SDR video up to 1440p, on AC power. Falls back to Smoother motion."/>
                             </ListBox>
                             <TextBlock Grid.Row="2" Text="Cleanup" Style="{StaticResource Dm.Label}" VerticalAlignment="Center" Margin="0,0,0,22"/>
                             <ListBox x:Name="EnhancedCleanupBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Dm.Rail}" Margin="0,0,0,22" AutomationProperties.Name="Enhanced cleanup preference">
