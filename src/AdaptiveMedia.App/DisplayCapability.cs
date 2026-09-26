@@ -36,12 +36,42 @@ public sealed record DisplayCapability(
     // descriptor cannot corroborate Windows' active HDR mode.
     public bool WindowsHdrPathActive => HdrSupported == true && HdrActive == true &&
         ActiveColorMode == "HDR" && DxgiColorSpace is 12 or 1;
+
+    // Windows WCG is SDR signalling with FP16 color-managed composition. An
+    // output descriptor without a matched EDID, active WCG, 10-bit path and
+    // OS-reported wide primaries cannot authorize this separate renderer class.
+    public int? QualifiedWcgPeakNits
+    {
+        get
+        {
+            if (WindowsHdrPathActive || WcgSupported != true || WcgActive != true ||
+                AdvancedColorActive != true || ActiveColorMode != "WCG" ||
+                BitsPerColor < 10 || DxgiColorSpace != 0 ||
+                string.IsNullOrWhiteSpace(PnpId) || EdidFingerprint?.Length != 64 ||
+                !EdidFingerprint.All(Uri.IsHexDigit) ||
+                RedPrimary is not { Length: 2 } red || GreenPrimary is not { Length: 2 } green ||
+                BluePrimary is not { Length: 2 } blue ||
+                !Near(red, .68, .32) || !Near(green, .265, .69) || !Near(blue, .15, .06) ||
+                ReportedMaxLuminance is not float max || !float.IsFinite(max) ||
+                max < 250 || max > 1000) return null;
+            if (ReportedMaxFullFrameLuminance is float full)
+            {
+                if (!float.IsFinite(full) || full < 250 || full > 1000) return null;
+                max = Math.Min(max, full);
+            }
+            return (int)Math.Floor(max / 10) * 10;
+        }
+    }
+
+    private static bool Near(float[] xy, double x, double y) =>
+        float.IsFinite(xy[0]) && float.IsFinite(xy[1]) &&
+        Math.Abs(xy[0] - x) <= .03 && Math.Abs(xy[1] - y) <= .03;
 }
 
 public enum ColorDelivery { Sdr, Pq, Hlg, Hdr10, Unknown }
 
 public sealed record DisplayColorPlan(ColorDelivery Source, ColorDelivery RendererTarget,
-    bool ToneMapToSdr, bool RtxVideoHdrEligible, string Reason);
+    bool ToneMapToSdr, bool RtxVideoHdrEligible, string Reason, int? TargetPeakNits = null);
 
 public static class DisplayColorPolicy
 {
@@ -51,9 +81,14 @@ public static class DisplayColorPolicy
         if (source.Transfer is "pq" or "hlg")
         {
             var kind = source.Transfer == "pq" ? ColorDelivery.Pq : ColorDelivery.Hlg;
-            return hdrPath
-                ? new(kind, kind, false, false, "Windows HDR is active on the matched target; the renderer is asked to preserve source HDR.")
-                : new(kind, ColorDelivery.Sdr, true, false, "The matched target has no verified active HDR path; the renderer is asked to tone-map to SDR.");
+            if (hdrPath)
+                return new(kind, kind, false, false, "Windows HDR is active on the matched target; the renderer is asked to preserve source HDR.");
+            if (display?.QualifiedWcgPeakNits is int peak)
+                return new(kind, ColorDelivery.Sdr, true, false,
+                    $"Windows WCG is active on the matched 10-bit display; libplacebo is asked for high-luminance wide-gamut SDR at the OS-reported {peak}-nit peak. Physical luminance remains unmeasured.",
+                    peak);
+            return new(kind, ColorDelivery.Sdr, true, false,
+                "The matched target has no verified active HDR or qualified WCG path; the renderer is asked to tone-map to conventional SDR.");
         }
         if (source.IsKnownSdr)
             return new(ColorDelivery.Sdr, ColorDelivery.Sdr, false, hdrPath,

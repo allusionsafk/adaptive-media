@@ -27,6 +27,8 @@ public sealed class AppSettings
     public int SchemaVersion { get; set; } = 1;
     public string Profile { get; set; } = "Automatic";
     public bool AutoHdrSwitch { get; set; } = false;
+    // Temporary internal-panel brightness boost for a verified playback target; opt-in only.
+    public bool CinemaBoost { get; set; } = false;
     public bool PreferExternalDisplay { get; set; } = true;
     public bool FullscreenExternal { get; set; } = true;
     public bool HdmiBitstream { get; set; } = false;

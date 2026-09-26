@@ -18,6 +18,11 @@
             </CheckBox>
             <TextBlock Text="DemiMedia reads the selected display's HDR state and plans playback accordingly. It does not change Windows HDR; a safe target-bound restore is not yet qualified."
                        Style="{StaticResource Dm.Meta}" FontSize="12" Margin="30,0,0,6" TextWrapping="Wrap"/>
+            <CheckBox x:Name="CinemaBoostCheck" Margin="0,10,0,4">
+                <TextBlock Text="Cinema Boost: temporarily raise the matched built-in display brightness during playback" TextWrapping="Wrap"/>
+            </CheckBox>
+            <TextBlock Text="Only on AC power with Energy Saver off and an exactly identified internal panel. Your brightness is restored after playback unless you change it yourself."
+                       Style="{StaticResource Dm.Meta}" FontSize="12" Margin="30,0,0,6" TextWrapping="Wrap"/>
             <CheckBox x:Name="ExternalCheck" Margin="0,10">
                 <TextBlock Text="Prefer an external display when connected" TextWrapping="Wrap"/>
             </CheckBox>

@@ -87,6 +87,10 @@ public sealed class PlaybackService
     /// the product always uses the defaults.</summary>
     public PlaybackHealthPolicy HealthPolicy { get; init; } = PlaybackHealthPolicy.Default;
 
+    /// <summary>Hardware observation seam for deterministic transition tests.</summary>
+    internal Func<DisplayCapability?, PlaybackTransitionObserver> TransitionObserverFactory { get; init; } =
+        display => new(display);
+
     /// <summary>What automatic recovery did during the most recent playback, if anything.</summary>
     public PlaybackRecoveryRecord? LastRecovery { get; private set; }
 
@@ -116,7 +120,8 @@ public sealed class PlaybackService
     /// <summary>What one attempt established: how it ended, and whether it claimed
     /// the playback's recovery, with the resume point it confirmed itself.</summary>
     private sealed record AttemptRun(int ExitCode, bool Started, TimeSpan Lifetime,
-        SustainedPlaybackHealth? RecoveryTrigger, PlaybackHealthSnapshot? Health);
+        SustainedPlaybackHealth? RecoveryTrigger, PlaybackHealthSnapshot? Health,
+        PlaybackTransitionFailure TransitionFailure = PlaybackTransitionFailure.None);
 
     public static string NativeConfigDirectory => Path.Combine(SettingsStore.DirectoryPath, "native-dv-config");
 
@@ -328,11 +333,22 @@ public sealed class PlaybackService
 
         var stableRun = await RunOnceAsync(plan, stopAfterSeconds, gate, PlaybackAttemptKind.Stable);
         int code = stableRun.ExitCode;
-        ReportStableHardFailure(stableRun);
+        if (plan.Renderer != "Compatibility D3D11" && ShouldRecoverTransition(stableRun))
+        {
+            var fallback = TransitionFallbackPlan(plan, plan.Executable, stableRun.TransitionFailure,
+                stableRun.Health?.ResumePosition);
+            RecordTransitionRecovery(stableRun);
+            LastReport.Plan = fallback;
+            var compatibleRun = await RunOnceAsync(fallback, stopAfterSeconds, gate, PlaybackAttemptKind.Stable);
+            code = compatibleRun.ExitCode;
+            ReportStableHardFailure(compatibleRun);
+        }
+        else ReportStableHardFailure(stableRun);
         // The compatibility retry is for a player that never got going. One that
         // played and then failed is a hard playback failure of the stable player,
         // which V1 reports rather than relaunching from the beginning.
-        if (code != 0 && plan.Renderer == "RTX D3D11" && stableRun.Health?.PlaybackProgressed != true)
+        if (code != 0 && plan.Renderer == "RTX D3D11" && stableRun.Health?.PlaybackProgressed != true &&
+            !ShouldRecoverTransition(stableRun))
         {
             const string reason = "The player stopped before useful playback. Retrying once with compatibility video and PCM audio; the cause is unconfirmed.";
             LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason);
@@ -447,6 +463,19 @@ public sealed class PlaybackService
                 ExitCode = run.ExitCode,
                 Lifetime = run.Lifetime,
             });
+            if (ShouldRecoverTransition(run))
+            {
+                // A lost device or sleep transition is not evidence that this
+                // native generation is defective. Do not demote it or spend the
+                // native rollback on another build using the same lost device.
+                var fallbackPlan = TransitionFallbackPlan(plan, selection.StableExecutable,
+                    run.TransitionFailure, run.Health?.ResumePosition);
+                RecordTransitionRecovery(run,
+                    selection.Retained ? PlaybackAttemptKind.NativePrevious : PlaybackAttemptKind.NativeCurrent,
+                    "native generation " + (attempt.GenerationId ?? "unknown"));
+                LastNativePlaybackStatus = NativeDvPlaybackStatus.RuntimeUnavailable;
+                return new(false, run.ExitCode, fallbackPlan);
+            }
             LastNativeHealth = verdict;
             NativeHealth.Record(attempt.GenerationId, verdict);
             DiagnosticsStore.Event(verdict.RuntimeAtFault ? "warning" : "info", "native-dv-health",
@@ -570,6 +599,53 @@ public sealed class PlaybackService
             plan = retryPlan;
             LastReport!.Plan = retryPlan;
         }
+    }
+
+    private static bool ShouldRecoverTransition(AttemptRun run) =>
+        run.Started && run.Health?.PlaybackProgressed == true &&
+        run.TransitionFailure != PlaybackTransitionFailure.None &&
+        (run.ExitCode != 0 || run.RecoveryTrigger is not null) &&
+        run.Health?.State is not (SustainedPlaybackHealth.UserStopped or SustainedPlaybackHealth.EndedNormally);
+
+    private void RecordTransitionRecovery(AttemptRun run,
+        PlaybackAttemptKind failedKind = PlaybackAttemptKind.Stable, string failedRuntime = "stable player")
+    {
+        var trigger = run.RecoveryTrigger ?? run.Health?.State ?? SustainedPlaybackHealth.RuntimeFailure;
+        if (trigger == SustainedPlaybackHealth.RecoveryStopped)
+            trigger = run.Health?.WorstCondition ?? SustainedPlaybackHealth.RuntimeFailure;
+        string cause = run.TransitionFailure == PlaybackTransitionFailure.PowerTransition
+            ? "Playback failed across a sleep or power transition."
+            : "The active graphics device was lost.";
+        RecordRecovery(new(PlaybackRecoveryStep.UseStablePlayback, trigger,
+            cause + " Resuming once with compatibility playback."), run.Health?.ResumePosition,
+            run, failedKind, failedRuntime, "compatibility player");
+    }
+
+    /// <summary>Re-read the active display after a graphics or power failure and
+    /// build one conservative path without NVIDIA processing or a pinned adapter.
+    /// This is a downgrade for the rest of the film; it is never upgraded mid-run.</summary>
+    private static PlaybackPlan TransitionFallbackPlan(PlaybackPlan failed, string executable,
+        PlaybackTransitionFailure failure, double? resumeAt)
+    {
+        var screens = MonitorInventory.GetScreens();
+        var displays = DisplayCapabilityProbe.Read();
+        int screen = screens.Length == 0 ? 0 : Math.Clamp(failed.Target.Screen, 0, screens.Length - 1);
+        var display = DisplayCapabilitySelection.ForScreen(displays, screens.ElementAtOrDefault(screen)?.Name);
+        var target = failed.Target with { Screen = screen, Display = display,
+            RefreshRateHz = display?.RefreshRateHz is > 0 ? display.RefreshRateHz : null };
+        string[] items = failed.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
+        var options = failed.Requested with { Profile = "Compatibility", UpscaleMode = "HighQuality",
+            RtxHdr = false, MotionMode = "Off", CleanupMode = "Off", FitMode = "Original",
+            AutoHdrSwitch = false,
+            Intent = failed.Requested.Intent is null ? null : EnhancementIntent.ForCompatibility() };
+        var plan = PlaybackPlanBuilder.Build(executable, Path.Combine(AppContext.BaseDirectory, "mpv-config"),
+            items, options, failed.Source, target, new(false, false),
+            "adaptive-media-" + Guid.NewGuid().ToString("N"));
+        return WithResume(CarryUserResume(failed, plan) with {
+            Reasons = plan.Reasons.Insert(0, failure == PlaybackTransitionFailure.PowerTransition
+                ? "The player failed across a power transition; display capability was rechecked before a single compatibility resume."
+                : "The graphics device was lost; display capability was rechecked before a single compatibility resume.")
+        }, resumeAt);
     }
 
     /// <summary>The final health of the attempt that ran last, plus the worst
@@ -796,6 +872,18 @@ public sealed class PlaybackService
         }
         evidence.TrackHealth(health.Snapshot);
         // Launch the exact immutable argument vector; do not probe or rebuild it here.
+        var transitionObserver = TransitionObserverFactory(plan.Target.Display);
+        // Each actual player attempt owns its own temporary panel-brightness session.
+        // The service revalidates the exact qualified WCG path and power state.
+        bool boostEnabled = plan.Color?.TargetPeakNits is not null && SettingsStore.Load().CinemaBoost;
+        using var cinemaBoost = boostEnabled ? CinemaBoostService.TryStart(plan.Target.Display, true) : null;
+        if (cinemaBoost is not null)
+        {
+            LastReport!.CinemaBoost.Add(new(health.AttemptId, cinemaBoost.EdidFingerprint,
+                cinemaBoost.OriginalBrightnessPercent, cinemaBoost.ObservedBoostedPercent));
+            evidence.ObserveBrightness(new(cinemaBoost.OriginalBrightnessPercent,
+                cinemaBoost.ObservedBoostedPercent));
+        }
         Process? started;
         try
         {
@@ -835,11 +923,13 @@ public sealed class PlaybackService
         // playback has nowhere to go in V1, so it is only reported.
         SustainedPlaybackHealth? claimed = null;
         Task recoveryStop = Task.CompletedTask;
-        if (kind != PlaybackAttemptKind.Stable)
+        if (kind != PlaybackAttemptKind.Stable || plan.Renderer != "Compatibility D3D11")
             health.Transitioned += transition =>
             {
                 if (transition.To is not (SustainedPlaybackHealth.Stalled or SustainedPlaybackHealth.Frozen) ||
                     !PlaybackRecoveryPolicy.IsTrigger(transition.To, health.Snapshot().PlaybackProgressed) ||
+                    (kind == PlaybackAttemptKind.Stable &&
+                     transitionObserver.ClassifyFailure(null) == PlaybackTransitionFailure.None) ||
                     !gate.TryClaim(health.AttemptId))
                     return;
                 claimed = transition.To;
@@ -875,7 +965,9 @@ public sealed class PlaybackService
         DiagnosticsStore.Event("info", "monitor-ended", "Player observation ended.");
         await stdout; string error = await stderr;
         if (process.ExitCode != 0) { LastReport!.Error = error; DiagnosticsStore.Event("error", "playback-exit", $"mpv exited with {process.ExitCode}"); }
-        return new(process.ExitCode, true, clock.Elapsed, claimed, final);
+        return new(process.ExitCode, true, clock.Elapsed, claimed, final,
+            process.ExitCode != 0 || claimed is not null ? transitionObserver.ClassifyFailure(error)
+                : PlaybackTransitionFailure.None);
     }
 
     /// <summary>Close an attempt's health with how its process ended, and keep the

@@ -138,6 +138,19 @@ internal static class PlaybackRecoveryTests
             Check(!PlaybackRecoveryPolicy.IsTrigger(c.State, true) && c.Snapshot().StallEpisodes == 0,
                 "two minutes of pause, buffering and seeking never produce a recovery trigger");
         }
+        Check(PlaybackTransitionRecovery.PowerChanged(
+            new(10_000, 10_000, 1, 0), new(14_000, 11_000, 1, 0)),
+            "three seconds asleep is a power transition");
+        Check(!PlaybackTransitionRecovery.PowerChanged(
+            new(10_000, 10_000, 1, 0), new(14_000, 14_000, 1, 0)),
+            "ordinary running time is not a sleep transition");
+        Check(PlaybackTransitionRecovery.PowerChanged(
+            new(10_000, 10_000, 1, 0), new(10_500, 10_500, 0, 0)),
+            "AC to battery is a power transition");
+        Check(PlaybackTransitionRecovery.Classify("DXGI_ERROR_DEVICE_REMOVED", false) == PlaybackTransitionFailure.GraphicsDeviceLost,
+            "an explicit device removal is classified");
+        Check(PlaybackTransitionRecovery.Classify("ordinary media error", false) == PlaybackTransitionFailure.None,
+            "an unrelated playback error is not classified as device loss");
         return count;
     }
 

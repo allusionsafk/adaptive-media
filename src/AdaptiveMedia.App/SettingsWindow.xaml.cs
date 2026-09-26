@@ -13,6 +13,7 @@ public partial class SettingsWindow : Window
         ResultSettings = settings;
         HdrCheck.IsChecked = false;
         HdrCheck.IsEnabled = false;
+        CinemaBoostCheck.IsChecked = settings.CinemaBoost;
         ExternalCheck.IsChecked = settings.PreferExternalDisplay;
         FullscreenCheck.IsChecked = settings.FullscreenExternal;
         BitstreamCheck.IsChecked = settings.HdmiBitstream;
@@ -25,6 +26,7 @@ public partial class SettingsWindow : Window
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         ResultSettings.AutoHdrSwitch = false;
+        ResultSettings.CinemaBoost = CinemaBoostCheck.IsChecked == true;
         ResultSettings.PreferExternalDisplay = ExternalCheck.IsChecked == true;
         ResultSettings.FullscreenExternal = FullscreenCheck.IsChecked == true;
         ResultSettings.HdmiBitstream = BitstreamCheck.IsChecked == true;

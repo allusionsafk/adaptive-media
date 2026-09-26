@@ -43,7 +43,7 @@ internal static class PlaybackRecoveryTests
         if (pipeName.StartsWith(@"\\.\pipe\")) pipeName = pipeName[9..];
         string? log = args.FirstOrDefault(x => x.StartsWith("--log-file="))?[11..];
         // Sustained-health modes compose like "full" at startup, then misbehave.
-        bool composes = mode is "full" or "partial" or "reject-stop" or "freeze" or "stall" or "crash-late" or "freeze-crash";
+        bool composes = mode is "full" or "partial" or "reject-stop" or "freeze" or "stall" or "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late";
         if (log is not null && mode != "silent")
             File.WriteAllText(log, "Initialized libplacebo test (API v371)\n" + (composes ?
                 "Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track)\n[vd] Opening decoder hevc\n[vd] Opening decoder hevc\n[vd] Selected decoder: hevc\n[vf] [el_pair]\nsh_dovi_compose_nlq\n[vd] Using hardware decoding (d3d11va).\n" : ""));
@@ -58,7 +58,7 @@ internal static class PlaybackRecoveryTests
                 await Task.Delay(1500);
                 File.AppendAllText(log, "Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track)\n[vd] Opening decoder hevc\n[vd] Opening decoder hevc\n[vd] Selected decoder: hevc\n[vf] [el_pair]\nsh_dovi_compose_nlq\n[vd] Using hardware decoding (d3d11va).\n");
             });
-        bool progresses = mode is "play" or "late-compose" or "pause" or "freeze" or "stall" or "crash-late" or "freeze-crash";
+        bool progresses = mode is "play" or "late-compose" or "pause" or "freeze" or "stall" or "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late";
         double from = double.TryParse(startArgument, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
         var gate = new object();
         Stopwatch? playing = null;
@@ -121,10 +121,15 @@ internal static class PlaybackRecoveryTests
                 _ = Serve(pipe);
             }
         });
-        if (mode is "crash-late" or "freeze-crash")
+        if (mode is "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late")
             _ = Task.Run(async () =>
             {
-                while (Elapsed() < (mode == "crash-late" ? 1.2 : 1.6)) await Task.Delay(20);
+                while (Elapsed() < (mode == "freeze-crash" ? 1.6 : 1.2)) await Task.Delay(20);
+                if (mode is "gpu-lost-late" or "power-fail-late")
+                {
+                    if (mode == "gpu-lost-late") Console.Error.WriteLine("vkQueueSubmit failed: DXGI_ERROR_DEVICE_REMOVED (0x887A0005)");
+                    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "behavior.txt"), "play");
+                }
                 Environment.Exit(unchecked((int)0xC0000005));
             });
         return await exit.Task.WaitAsync(TimeSpan.FromSeconds(30));
@@ -150,7 +155,16 @@ internal static class PlaybackRecoveryTests
         {
             if (only is null or "pins") await PinsAsync(root, check);
             if (only == "pins") return;
-            string storeRoot = Path.Combine(root, "runtimes", "native-dv");
+            var brightnessReport = new SessionDiagnostics();
+            brightnessReport.CinemaBoost.Add(new(7, "fixture-fingerprint", 80, 100));
+            using (var saved = JsonDocument.Parse(File.ReadAllText(DiagnosticsStore.Save(brightnessReport))))
+            {
+                var entry = saved.RootElement.GetProperty("CinemaBoost")[0];
+                check(entry.GetProperty("Attempt").GetInt64() == 7 &&
+                      entry.GetProperty("OriginalBrightnessPercent").GetInt32() == 80 &&
+                      entry.GetProperty("ObservedBoostedPercent").GetInt32() == 100,
+                    "CINEMA BOOST: typed per-attempt brightness percentages survive report save");
+            }            string storeRoot = Path.Combine(root, "runtimes", "native-dv");
             var store = new NativeDvRuntimeStore(storeRoot);
             NativeDvRuntimeDescriptor Install(char id, string mode, bool unlaunchable = false)
             {
@@ -492,6 +506,21 @@ internal static class PlaybackRecoveryTests
                         "SUSTAINED RECOVERY: " + calm + " then stop never triggers recovery");
                 }
 
+                // A graphics reset is a device failure, not a bad native runtime.
+                // It goes directly to compatibility without trying another native generation.
+                Reset(); Mode(a, "gpu-lost-late"); Mode(b, "play");
+                {
+                    int bBefore = Count(Launches(b)), stableBefore = Count(stableLaunches);
+                    int nativeFaultsBefore = service.NativeHealth.FaultCount(a.VersionId);
+                    await service.LaunchAsync(plan, 3);
+                    var report = service.LastReport!;
+                    check(service.NativeHealth.FaultCount(a.VersionId) == nativeFaultsBefore && service.LastNativeHealth is null,
+                        "TRANSITION RECOVERY: device removal does not diagnose or demote the native generation");
+                    check(Count(Launches(b)) == bBefore && Count(stableLaunches) == stableBefore + 1 &&
+                          report.Attempts.Count == 2 && report.Attempts[1].Renderer == "Compatibility D3D11" &&
+                          report.Attempts[1].RecoveryResumeAt is > 0,
+                        "TRANSITION RECOVERY: native device loss bypasses runtime rollback and resumes in compatibility");
+                }
                 // 23: stable playback that fails hard is reported, not relaunched.
                 var stablePlan = await service.PrepareAsync([media], new("Reference", "Off", "Off", false, false),
                     new SystemSummary { MpvPath = stableExe }, new AppSettings { NativeDolbyVisionLane = false, AutoHdrSwitch = false }, new(1280, 720));
@@ -504,6 +533,36 @@ internal static class PlaybackRecoveryTests
                           service.LastRecovery?.Step == nameof(PlaybackRecoveryStep.NoRecoveryAvailable) && service.LastRecovery.Trigger == trigger.ToString(),
                         "SUSTAINED RECOVERY: stable " + failure + " is reported and not relaunched");
                 }
+                // A device removal after real progress takes one conservative recovery,
+                // resumes from confirmed position, and never upgrades mid-film.
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "gpu-lost-late");
+                {
+                    int before = Count(stableLaunches);
+                    await service.LaunchAsync(stablePlan, 3);
+                    var report = service.LastReport!;
+                    check(Count(stableLaunches) == before + 2 && report.Attempts.Count == 2 &&
+                          report.Attempts[1].Renderer == "Compatibility D3D11" &&
+                          report.Attempts[1].RecoveryResumeAt is > 0 &&
+                          report.Recovery.Single().LaunchedAttempt is not null,
+                        "TRANSITION RECOVERY: device removal resumes once on compatibility playback");
+                }
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "power-fail-late");
+                var powerService = new PlaybackService
+                {
+                    NativeDolbyVision = null, HealthPolicy = FastHealth,
+                    TransitionObserverFactory = display =>
+                    {
+                        int reads = 0;
+                        return new PlaybackTransitionObserver(display, () => ++reads == 1
+                            ? new(10_000, 10_000, 1, 0) : new(14_000, 11_000, 1, 0));
+                    }
+                };
+                await powerService.LaunchAsync(stablePlan, 3);
+                check(powerService.LastReport!.Attempts.Count == 2 &&
+                      powerService.LastReport.Attempts[1].Renderer == "Compatibility D3D11" &&
+                      powerService.LastReport.Attempts[1].RecoveryResumeAt is > 0 &&
+                      powerService.LastReport.Recovery.Single().Explanation.Contains("power transition"),
+                    "TRANSITION RECOVERY: a power gap and failed player cause one compatible resume");
                 File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "base");
                 Mode(a, "full"); Mode(b, "base"); Reset();
             }

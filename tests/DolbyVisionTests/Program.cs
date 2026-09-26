@@ -629,6 +629,21 @@ Check(productPlan.Arguments.Contains("--autofit=2560x1440") && productPlan.Argum
 Check(productPlan.Arguments.Contains("--target-trc=bt.1886") && productPlan.Arguments.Contains("--target-prim=bt.709") &&
     productPlan.Arguments.Contains("--target-colorspace-hint=auto"),
     "Native Profile 7 on an unverified HDR target requests managed SDR tone mapping");
+var wcgDisplay = new DisplayCapability(PnpId: @"DISPLAY\BOE0C4B\5&39391d08&1&UID4354",
+    EdidFingerprint: "1B5EAD2BDE875922DC92150000696F1AC51203F92B57865EBC7C1928F642B39C",
+    HdrSupported: false, HdrActive: false, WcgSupported: true, WcgActive: true, AdvancedColorActive: true,
+    ActiveColorMode: "WCG", BitsPerColor: 10, DxgiColorSpace: 0, ReportedMaxLuminance: 270,
+    RedPrimary: [0.68066406f, 0.31445312f], GreenPrimary: [0.27148438f, 0.6894531f],
+    BluePrimary: [0.15039062f, 0.044921875f]);
+var nativeWcg = NativeDvPlaybackPlanner.Build(fel, pinned, @"C:\media\authored.mkv", "config", "wcg-pipe",
+    experimentalLaneEnabled: true, enhancementLayer: true,
+    target: new PlaybackTarget(2560, 1600, Display: wcgDisplay), allowUnclassifiedEnhancementLayer: true);
+Check(nativeWcg.Supported && nativeWcg.Arguments.Contains("--target-peak=270") &&
+    nativeWcg.Arguments.Contains("--hdr-reference-white=270") &&
+    nativeWcg.Arguments.Contains("--d3d11-output-format=rgba16f") &&
+    nativeWcg.Arguments.Contains("--d3d11-output-csp=linear") &&
+    nativeWcg.Arguments.Contains("--target-prim=display-p3"),
+    "Native FEL composition can render through the same qualified WCG SDR path without DV display signalling");
 var hdrDisplay = new DisplayCapability(HdrSupported: true, HdrActive: true, ActiveColorMode: "HDR", DxgiColorSpace: 12);
 var nativeHdr = NativeDvPlaybackPlanner.Build(fel, pinned, @"C:\media\authored.mkv", "config", "hdr-pipe",
     experimentalLaneEnabled: true, enhancementLayer: true,

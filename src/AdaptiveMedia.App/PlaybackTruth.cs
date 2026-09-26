@@ -9,6 +9,9 @@ namespace AdaptiveMedia;
 public sealed record NativeCompositionFacts(bool RendererActive, int DecoderInstances, bool BaseAndEnhancementPaired,
     bool FelComposed, string Delivered, string? HardwareDecoder, bool RpuProcessed = false);
 
+/// <summary>Readback of one temporary panel brightness change in Windows percent, never nits.</summary>
+public sealed record PanelBrightnessObservation(int OriginalPercent, int BoostedPercent);
+
 /// <summary>Everything one attempt established, and nothing it did not. Owned by
 /// exactly one attempt: a replacement gets a new instance, so evidence cannot
 /// travel between attempts.</summary>
@@ -21,6 +24,7 @@ public sealed class PlaybackAttemptEvidence
     private NativeCompositionFacts? _native;
     private PlaybackHealthSnapshot? _health;
     private DisplayCapability? _observedDisplay;
+    private PanelBrightnessObservation? _brightness;
     private Func<PlaybackHealthSnapshot>? _liveHealth;
 
     public PlaybackAttemptEvidence(long attemptId, int number, PlaybackPlan plan, PlaybackAttemptKind kind, string runtime,
@@ -65,6 +69,14 @@ public sealed class PlaybackAttemptEvidence
     }
 
     public DisplayCapability? ObservedDisplay { get { lock (_gate) return _observedDisplay; } }
+
+    public void ObserveBrightness(PanelBrightnessObservation observation)
+    {
+        if (observation.OriginalPercent is < 0 or >= 100 || observation.BoostedPercent != 100) return;
+        lock (_gate) if (!_finished) _brightness = observation;
+    }
+
+    public PanelBrightnessObservation? ObservedBrightness { get { lock (_gate) return _brightness; } }
 
     /// <summary>Whether each path this attempt's own plan asked for was delivered,
     /// judged only from this attempt's own runtime evidence.</summary>
@@ -141,7 +153,7 @@ public static class PlaybackTruthBuilder
         var requested = Requested(current);
         var planned = Planned(current);
         var observedLines = Observed(current.Plan, observed, native, current.Kind != PlaybackAttemptKind.Stable, current.Started, delivery,
-            current.ObservedDisplay);
+            current.ObservedDisplay, current.ObservedBrightness);
         var fallbackLines = delivery.Where(v => v.State == DeliveryState.FellBack).Select(v => v.Label + " → " + v.Evidence).ToList();
         if (current.Plan.FitPlanned && SmartFitEvidence(observed).Fallback is { } fitFailure)
             fallbackLines.Add(SmartFitOriginalGeometry(observed)
@@ -289,7 +301,9 @@ public static class PlaybackTruthBuilder
         if (plan.FitPlanned) lines.Add("Smart Fill source-only reframing; processing awaits runtime evidence");
         else if (plan.Requested.FitMode == "SmartFill") lines.Add("Original framing; Smart Fill unavailable on this path");
         if (plan.Color is { } color)
-            lines.Add(color.ToneMapToSdr ? "HDR source → SDR renderer target (tone mapping planned)" :
+            lines.Add(color.TargetPeakNits is int peak
+                ? $"High-luminance wide-gamut SDR planned at OS-reported {peak} nits; Windows WCG is not HDR signalling"
+                : color.ToneMapToSdr ? "HDR source → SDR renderer target (tone mapping planned)" :
                 plan.RtxHdrConstructed ? "Known SDR → RTX Video HDR renderer target requested; processing and output await observation" :
                 color.RendererTarget is ColorDelivery.Pq or ColorDelivery.Hlg or ColorDelivery.Hdr10 ? "Source HDR preserved on planned HDR renderer path" :
                 color.RendererTarget == ColorDelivery.Unknown ? "Renderer color target unclassified; output awaits observation" :
@@ -301,6 +315,28 @@ public static class PlaybackTruthBuilder
         return lines;
     }
 
+    private static bool WcgOutputObserved(PlaybackPlan plan, IReadOnlyDictionary<string, JsonElement> observed,
+        DisplayCapability? display)
+    {
+        if (plan.Color?.TargetPeakNits is not int peak || display?.QualifiedWcgPeakNits != peak ||
+            DisplayCapabilitySelection.ForAttempt([display], plan.Target.Display) != display ||
+            !observed.TryGetValue("video-target-params", out var target) || target.ValueKind != JsonValueKind.Object)
+            return false;
+        if (!target.TryGetProperty("gamma", out var gamma) || gamma.ValueKind != JsonValueKind.String || gamma.GetString() != "scrgb" ||
+            !target.TryGetProperty("pixelformat", out var format) || format.ValueKind != JsonValueKind.String || format.GetString() != "rgba16hf" ||
+            !target.TryGetProperty("max-luma", out var max) || max.ValueKind != JsonValueKind.Number || !max.TryGetDouble(out double nits) ||
+            Math.Abs(nits - peak) > 1) return false;
+        return Matches("prim-red-x", "prim-red-y", display.RedPrimary) &&
+            Matches("prim-green-x", "prim-green-y", display.GreenPrimary) &&
+            Matches("prim-blue-x", "prim-blue-y", display.BluePrimary);
+
+        bool Matches(string xName, string yName, float[]? xy) =>
+            xy is { Length: 2 } && target.TryGetProperty(xName, out var x) &&
+            target.TryGetProperty(yName, out var y) && x.ValueKind == JsonValueKind.Number &&
+            y.ValueKind == JsonValueKind.Number && x.TryGetDouble(out double xv) &&
+            y.TryGetDouble(out double yv) && Math.Abs(xv - xy[0]) < .005 &&
+            Math.Abs(yv - xy[1]) < .005;
+    }
     private static (int W, int H)? Size(IReadOnlyDictionary<string, JsonElement> observed, string name)
     {
         if (!observed.TryGetValue(name, out var v) || v.ValueKind != JsonValueKind.Object) return null;
@@ -357,10 +393,17 @@ public static class PlaybackTruthBuilder
     /// the ones that fell back are listed under Fallback instead.</summary>
     public static List<string> Observed(PlaybackPlan plan, IReadOnlyDictionary<string, JsonElement> observed,
         NativeCompositionFacts? native, bool nativeAttempt, bool started, IReadOnlyList<DeliveryVerdict>? delivery = null,
-        DisplayCapability? observedDisplay = null)
+        DisplayCapability? observedDisplay = null, PanelBrightnessObservation? brightness = null)
     {
         var lines = new List<string>();
         if (!started) { lines.Add("Nothing observed: the player did not start."); return lines; }
+        if (brightness is { } b && plan.Color?.TargetPeakNits is not null)
+            lines.Add($"Cinema Boost observed at launch: panel brightness {b.OriginalPercent}% → {b.BoostedPercent}%; physical luminance unmeasured");
+        bool wcgObserved = WcgOutputObserved(plan, observed, observedDisplay);
+        if (wcgObserved)
+            lines.Add($"Output: High-luminance wide-gamut SDR · {plan.Color!.TargetPeakNits} nits in FP16 scRGB renderer; Windows WCG active; physical panel luminance unmeasured");
+        else if (plan.Color?.TargetPeakNits is not null)
+            lines.Add("WCG output not verified on the current display and renderer");
         delivery ??= [];
         if (nativeAttempt)
         {
@@ -411,7 +454,7 @@ public static class PlaybackTruthBuilder
                         ? "Windows HDR active on the matched target (read-only query); physical display output unmeasured"
                         : "display HDR state unverified; physical display output unmeasured"));
             }
-            else lines.Add("SDR output reported by renderer; physical display output unmeasured");
+            else if (!wcgObserved) lines.Add("SDR output reported by renderer; physical display output unmeasured");
         }
         if (observedDisplay is { } display &&
             (!observed.TryGetValue("video-target-params", out var transferParams) ||
@@ -491,6 +534,8 @@ public static class PlaybackTruthBuilder
         if (attempt.Kind != PlaybackAttemptKind.Stable)
             lines.Add(native is null || !native.RendererActive ? "Composition not observed"
                 : native.FelComposed ? "Full FEL observed" : native.Delivered == "BaseLayerOnly" ? "Base layer only" : "Composition unknown");
+        if (attempt.ObservedBrightness is { } b)
+            lines.Add($"Cinema Boost at launch: panel brightness {b.OriginalPercent}% → {b.BoostedPercent}%");
         // What that attempt itself established; it stays with that attempt.
         var delivery = attempt.Delivery();
         string Names(DeliveryState state) => string.Join(", ", delivery.Where(v => v.State == state).Select(v => v.Label));

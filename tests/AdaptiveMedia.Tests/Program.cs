@@ -84,7 +84,39 @@ Check(!(verifiedHdr with { DxgiColorSpace = 0 }).WindowsHdrPathActive, "SDR DXGI
 Check(!(verifiedHdr with { HdrActive = false }).WindowsHdrPathActive, "HDR support is not active HDR");
 Check(!(verifiedHdr with { HdrSupported = null }).WindowsHdrPathActive, "Unknown support is not an HDR grant");
 Check(!(verifiedHdr with { ActiveColorMode = "WCG" }).WindowsHdrPathActive, "Wide gamut active is not HDR active");
-var displayA = verifiedHdr with { SourceName = @"\\.\DISPLAY1", AdapterLow = 1, TargetId = 11 };
+var qualifiedWcg = new DisplayCapability(PnpId: @"DISPLAY\BOE0C4B\5&39391d08&1&UID4354",
+    EdidFingerprint: "1B5EAD2BDE875922DC92150000696F1AC51203F92B57865EBC7C1928F642B39C",
+    HdrSupported: false, HdrActive: false, WcgSupported: true, WcgActive: true, AdvancedColorActive: true,
+    ActiveColorMode: "WCG", BitsPerColor: 10, DxgiColorSpace: 0,
+    ReportedMaxLuminance: 270, DxgiAdapter: "NVIDIA GeForce RTX 4080 Laptop GPU",
+    RedPrimary: [0.68066406f, 0.31445312f], GreenPrimary: [0.27148438f, 0.6894531f],
+    BluePrimary: [0.15039062f, 0.044921875f], WhitePoint: [0.31347656f, 0.32910156f]);
+var brightWcg = Plan(media with { Transfer = "pq", Primaries = "bt.2020" },
+    target with { Display = qualifiedWcg });
+Check(brightWcg.Arguments.Contains("--hdr-reference-white=270") &&
+    brightWcg.Arguments.Contains("--tone-mapping=mobius") &&
+    brightWcg.Arguments.Contains("--d3d11-output-format=rgba16f") &&
+    brightWcg.Arguments.Contains("--d3d11-output-csp=linear"),
+    "WCG plans the tested FP16 scRGB path and does not let mpv's SDR reference white override target peak");
+Check(brightWcg.Arguments.Contains("--target-peak=270"),
+    "An active 10-bit WCG panel with a matched EDID and OS-reported peak uses its reported luminance");
+Check(brightWcg.Arguments.Contains("--target-trc=bt.1886") &&
+    !brightWcg.Arguments.Any(x => x.Contains("g2084") || x.Contains("pq")),
+    "High-luminance WCG remains an SDR transfer, never invented HDR signalling");
+Check((qualifiedWcg with { WcgActive = false }).QualifiedWcgPeakNits is null,
+    "A supported but inactive WCG mode cannot authorize a brighter renderer");
+Check((qualifiedWcg with { BitsPerColor = 8 }).QualifiedWcgPeakNits is null,
+    "An 8-bit path cannot authorize high-luminance WCG");
+Check((qualifiedWcg with { EdidFingerprint = null }).QualifiedWcgPeakNits is null,
+    "Unknown display identity cannot authorize high-luminance WCG");
+Check((qualifiedWcg with { RedPrimary = [0.64f, 0.33f] }).QualifiedWcgPeakNits is null,
+    "BT.709 primaries cannot authorize wide-gamut output");
+Check((qualifiedWcg with { ReportedMaxLuminance = 500, ReportedMaxFullFrameLuminance = 200 }).QualifiedWcgPeakNits is null,
+    "A low sustained luminance descriptor cannot authorize an elevated peak");
+Check((qualifiedWcg with { ReportedMaxLuminance = float.NaN }).QualifiedWcgPeakNits is null,
+    "Invalid OS luminance cannot authorize an elevated peak");
+Check(Plan(media, target with { Display = qualifiedWcg }).Color?.TargetPeakNits is null,
+    "Known SDR source remains SDR even on an active WCG path");var displayA = verifiedHdr with { SourceName = @"\\.\DISPLAY1", AdapterLow = 1, TargetId = 11 };
 var displayB = verifiedHdr with { SourceName = @"\\.\DISPLAY2", AdapterLow = 2, TargetId = 22 };
 Check(DisplayCapabilitySelection.ForScreen([displayA, displayB], @"\\.\DISPLAY2") == displayB,
     "Selected screen maps to its own display path");
