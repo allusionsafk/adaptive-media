@@ -1,4 +1,4 @@
-# Inputs of DemiMedia's experimental Generated Motion runtime (gm-2026-09-26-1).
+# Inputs of DemiMedia's experimental Generated Motion runtime (gm-2026-09-27-1; stop-reliability build).
 # Nothing here is redistributed by this repository; each input is fetched and
 # verified locally, and the NVIDIA library comes from the user's own SDK download.
 

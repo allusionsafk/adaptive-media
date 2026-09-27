@@ -824,6 +824,57 @@ public sealed class PlaybackService
         Announce(PlaybackRecoveryText.Describe(decision, null));
     }
 
+    /// <summary>Reads every event the player broadcasts on its own connection and
+    /// records why the file ended. Ends when the player closes the pipe.</summary>
+    private static async Task ListenForEndFileAsync(string pipeName, PlaybackHealthMonitor health, CancellationToken token)
+    {
+        try
+        {
+            using var pipe = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                System.IO.Pipes.PipeOptions.Asynchronous);
+            var connectBy = Stopwatch.StartNew();
+            while (!pipe.IsConnected)
+            {
+                try { await pipe.ConnectAsync(250, token); }
+                catch (TimeoutException) { if (connectBy.Elapsed > TimeSpan.FromSeconds(30)) return; }
+                catch (IOException) { if (connectBy.Elapsed > TimeSpan.FromSeconds(30)) return; await Task.Delay(100, token); }
+            }
+            using var reader = new StreamReader(pipe);
+            while (await reader.ReadLineAsync(token) is { } line)
+            {
+                if (!line.Contains("end-file", StringComparison.Ordinal)) continue;
+                using var message = JsonDocument.Parse(line);
+                var root = message.RootElement;
+                if (root.TryGetProperty("event", out var name) && name.GetString() == "end-file" &&
+                    root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String)
+                    health.RecordEndFile(reason.GetString()!);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException or UnauthorizedAccessException or ObjectDisposedException) { }
+    }
+
+    /// <summary>A Generated Motion runtime asked to stop gets a short graceful window;
+    /// after that this exact process is terminated. The playback is already over, so
+    /// OS cleanup is preferred to waiting on vendor teardown.</summary>
+    private static async Task TerminateGeneratedMotionAfterGraceAsync(Process process)
+    {
+        try
+        {
+            using var wait = new CancellationTokenSource(GeneratedMotionTeardown.Grace);
+            await process.WaitForExitAsync(wait.Token);
+            return;
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { return; }
+        try
+        {
+            process.Kill(entireProcessTree: false);
+            DiagnosticsStore.Event("info", "generated-motion-teardown", "The stopped Generated Motion runtime did not exit in time and was terminated.");
+        }
+        catch (InvalidOperationException) { /* Already exited. */ }
+        catch (System.ComponentModel.Win32Exception) { /* Exiting; nothing more to do. */ }
+    }
+
     /// <summary>Stop an owned player for recovery: a graceful quit when the player
     /// still answers, a bounded wait, then termination of exactly this process —
     /// never any other player, whatever its name.</summary>
@@ -1003,14 +1054,34 @@ public sealed class PlaybackService
         using var cancellation = new CancellationTokenSource();
         var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task monitor = MonitorAsync(plan, stopAfterSeconds, cancellation.Token, connected, health, evidence, process);
+        // The polling connections only see events in passing; the experimental runtime
+        // needs to know reliably that a film ended before it exited.
+        // It has its own token: at exit it may still hold the player's last lines.
+        using var listenerStop = new CancellationTokenSource();
+        Task endListener = plan.Renderer == GeneratedMotionPolicy.Renderer
+            ? ListenForEndFileAsync(plan.PipeName, health, listenerStop.Token) : Task.CompletedTask;
         Task sampling = health.RunAsync(connected.Task, clock, cancellation.Token);
         await process.WaitForExitAsync();
         DiagnosticsStore.Event("info", "player-exited", "Player process exited.");
         cancellation.Cancel();
         try { await monitor; } catch (OperationCanceledException) { }
         try { await sampling; } catch (OperationCanceledException) { }
+        // The pipe closing ends the listener; the deadline only bounds a stuck read.
+        listenerStop.CancelAfter(TimeSpan.FromSeconds(1));
+        try { await endListener; } catch (OperationCanceledException) { }
         await recoveryStop;
-        EndHealth(health, clock, true, process.ExitCode);
+        int exitCode = process.ExitCode;
+        // The experimental runtime may fault inside vendor teardown after the film has
+        // ended or after DemiMedia asked it to stop. That is a completed stop, not a
+        // failed playback; a fault while it is still playing is never contained.
+        if (GeneratedMotionTeardown.Contained(plan.Renderer, exitCode, health.StopRequested, health.EndFileReason))
+        {
+            DiagnosticsStore.Event("info", "generated-motion-teardown",
+                $"The Generated Motion runtime exited with 0x{exitCode:X8} after playback had ended " +
+                $"(end={health.EndFileReason ?? "stop requested"}); treated as a completed stop.");
+            exitCode = 0;
+        }
+        EndHealth(health, clock, true, exitCode);
         evidence.Finish(health.Snapshot());
         LastReport!.Delivery.Add(new(health.AttemptId, runtime, evidence.Delivery().Select(v => v.Describe()).ToArray()));
         var final = health.Snapshot();
@@ -1024,9 +1095,9 @@ public sealed class PlaybackService
         gate.Retire(health.AttemptId);
         DiagnosticsStore.Event("info", "monitor-ended", "Player observation ended.");
         await stdout; string error = await stderr;
-        if (process.ExitCode != 0) { LastReport!.Error = error; DiagnosticsStore.Event("error", "playback-exit", $"mpv exited with {process.ExitCode}"); }
-        return new(process.ExitCode, true, clock.Elapsed, claimed, final,
-            process.ExitCode != 0 || claimed is not null ? transitionObserver.ClassifyFailure(error)
+        if (exitCode != 0) { LastReport!.Error = error; DiagnosticsStore.Event("error", "playback-exit", $"mpv exited with {exitCode}"); }
+        return new(exitCode, true, clock.Elapsed, claimed, final,
+            exitCode != 0 || claimed is not null ? transitionObserver.ClassifyFailure(error)
                 : PlaybackTransitionFailure.None);
     }
 
@@ -1185,9 +1256,14 @@ public sealed class PlaybackService
                     StatusChanged?.Invoke(plan.Summary + "\n" + state.GetString() + "\n" + PlaybackHealthText.Describe(health.Snapshot().State));
                 if (stopAfterSeconds.HasValue && timer.Elapsed.TotalSeconds >= stopAfterSeconds)
                 {
+                    bool generated = plan.Renderer == GeneratedMotionPolicy.Renderer;
+                    // Release NVIDIA FRUC before the player tears down its renderer; the
+                    // filter stops taking new work and passes frames through.
+                    if (generated) await ipc.CommandSucceededAsync(["vf-command", GeneratedMotionPolicy.FilterLabel, "teardown", ""], queryTimeout.Token);
                     bool stopped = await ipc.CommandSucceededAsync(["quit"], queryTimeout.Token);
                     if (attempt is not null) attempt.StopRequested = stopped;
                     if (stopped) health.MarkStopRequested();
+                    if (stopped && generated) _ = TerminateGeneratedMotionAfterGraceAsync(process);
                     return;
                 }
                 await Task.Delay(1000, cancellation);

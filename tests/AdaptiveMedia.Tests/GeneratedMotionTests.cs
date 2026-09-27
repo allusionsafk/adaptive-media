@@ -122,6 +122,22 @@ internal static class GeneratedMotionTests
               blendVerdicts.All(v => !v.Label.Contains("Generated", StringComparison.OrdinalIgnoreCase)),
             "Blend Smooth is never labelled or credited as generated motion");
 
+        // Teardown containment: only a finished Generated Motion playback is let go quietly.
+        const int accessViolation = unchecked((int)0xC0000005), stackOverrun = unchecked((int)0xC0000409);
+        string gm = GeneratedMotionPolicy.Renderer;
+        Check(GeneratedMotionTeardown.Contained(gm, accessViolation, true, null) &&
+              GeneratedMotionTeardown.Contained(gm, -1, true, null),
+            "after a requested stop, a fault or a deliberate termination is a completed stop");
+        Check(GeneratedMotionTeardown.Contained(gm, accessViolation, false, "eof") &&
+              GeneratedMotionTeardown.Contained(gm, stackOverrun, false, "quit"),
+            "a fault after the player reported the end of the file is contained");
+        Check(!GeneratedMotionTeardown.Contained(gm, accessViolation, false, null),
+            "a fault while the film is still playing stays a runtime failure");
+        Check(!GeneratedMotionTeardown.Contained(gm, 2, false, "eof") && !GeneratedMotionTeardown.Contained(gm, accessViolation, false, "error"),
+            "ordinary error exits and media errors are never contained");
+        Check(!GeneratedMotionTeardown.Contained("NVIDIA Vulkan", accessViolation, true, "eof") && !GeneratedMotionTeardown.Contained(gm, 0, false, "eof"),
+            "containment applies only to the experimental runtime and only to non-zero exits");
+
         // Truth wording
         var evidence = new PlaybackAttemptEvidence(1, 1, planned, PlaybackAttemptKind.Stable, "stable player") { Started = true };
         var props = Props(Fruc("active", 574, 2));

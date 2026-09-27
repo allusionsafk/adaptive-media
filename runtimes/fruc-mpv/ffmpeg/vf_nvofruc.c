@@ -20,6 +20,9 @@
 #include <d3d11_4.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "libavutil/avstring.h"
 #include "libavutil/hwcontext.h"
@@ -79,20 +82,29 @@ typedef struct FrucRegister {
     uint32_t count;
 } FrucRegister;
 
+typedef struct FrucUnregister {
+    void *resources[FRUC_MAX_RESOURCE];
+    uint32_t count;
+} FrucUnregister;
+
 typedef struct FrucOpaque *FrucHandle;
 typedef int (__stdcall *FrucCreateFn)(const FrucCreateParam *, FrucHandle *);
 typedef int (__stdcall *FrucRegisterFn)(FrucHandle, const FrucRegister *);
 typedef int (__stdcall *FrucProcessFn)(FrucHandle, const FrucProcessIn *, const FrucProcessOut *);
+typedef int (__stdcall *FrucUnregisterFn)(FrucHandle, const FrucUnregister *);
+typedef int (__stdcall *FrucDestroyFn)(FrucHandle);
 
 /* ---- One FRUC instance per process ----
  * The SDK cannot register resources on a second instance created after Destroy in
  * the same process, and mpv rebuilds lavfi graphs on seek. The instance therefore
  * lives for the whole process and is shared by successive filter instances. */
 typedef struct FrucShared {
-    int created;              ///< 1 once creation succeeded, -1 once it failed
+    int created;              ///< 1 once creation succeeded, -1 once it failed, -2 once torn down
     char failure[128];
     HMODULE dll;
     FrucProcessFn process;
+    FrucUnregisterFn unregister;
+    FrucDestroyFn destroy;
     FrucHandle handle;
     ID3D11Device *device;
     int width, height;
@@ -107,6 +119,29 @@ typedef struct FrucShared {
 
 static FrucShared shared;
 static AVMutex shared_lock = AV_MUTEX_INITIALIZER;
+
+/* Lifecycle trace for diagnosing teardown. Off unless DEMIMEDIA_NVOFRUC_TRACE names a
+ * file; every line is flushed so a crash leaves the last completed stage behind. */
+static FILE *trace_file;
+static int trace_state; ///< 0 unknown, 1 on, -1 off
+static void trace(const char *fmt, ...)
+{
+    va_list ap;
+    if (!trace_state) {
+        const char *path = getenv("DEMIMEDIA_NVOFRUC_TRACE");
+        trace_file = path && path[0] ? fopen(path, "a") : NULL;
+        trace_state = trace_file ? 1 : -1;
+    }
+    if (trace_state < 0)
+        return;
+    fprintf(trace_file, "%lu %lu ", (unsigned long)GetTickCount(), (unsigned long)GetCurrentThreadId());
+    va_start(ap, fmt);
+    vfprintf(trace_file, fmt, ap);
+    va_end(ap);
+    fputc('\n', trace_file);
+    fflush(trace_file);
+}
+static void trace_detach(void) { trace("process-detach"); }
 
 typedef struct NvOFrucContext {
     const AVClass *class;
@@ -202,7 +237,9 @@ static void shared_create(NvOFrucContext *s, ID3D11Device5 *dev5)
     create = (FrucCreateFn)GetProcAddress(shared.dll, "NvOFFRUCCreate");
     reg = (FrucRegisterFn)GetProcAddress(shared.dll, "NvOFFRUCRegisterResource");
     shared.process = (FrucProcessFn)GetProcAddress(shared.dll, "NvOFFRUCProcess");
-    if (!create || !reg || !shared.process) {
+    shared.unregister = (FrucUnregisterFn)GetProcAddress(shared.dll, "NvOFFRUCUnregisterResource");
+    shared.destroy = (FrucDestroyFn)GetProcAddress(shared.dll, "NvOFFRUCDestroy");
+    if (!create || !reg || !shared.process || !shared.unregister || !shared.destroy) {
         snprintf(shared.failure, sizeof(shared.failure), "FRUC entry points missing");
         return;
     }
@@ -235,6 +272,60 @@ static void shared_create(NvOFrucContext *s, ID3D11Device5 *dev5)
     shared.width = s->width;
     shared.height = s->height;
     shared.created = 1;
+    {
+        /* After FRUC has used the device, a vendor thread can still call into
+         * d3d11.dll after the player's renderer has unloaded it (faulting module
+         * "d3d11.dll_unloaded" +0x62095). Keep it mapped until the process ends. */
+        HMODULE pinned = NULL;
+        BOOL ok = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"d3d11.dll", &pinned);
+        trace("d3d11-pinned %d", ok);
+    }
+    atexit(trace_detach);
+    trace("fruc-created %dx%d", s->width, s->height);
+}
+
+/* Releases NVIDIA FRUC before the player tears down its renderer's D3D11 device.
+ * Called with shared_lock held. FRUC's CUDA interop must not outlive that device:
+ * leaving it registered across mpv's shutdown faults (0xC0000005) intermittently.
+ * The instance cannot be re-created in this process, so later streams pass through. */
+static void shared_teardown(const char *why)
+{
+    FrucUnregister up = { 0 };
+    if (shared.created != 1)
+        return;
+    shared.created = -2;
+    snprintf(shared.failure, sizeof(shared.failure), "FRUC released (%s)", why);
+    trace("teardown-begin %s fence=%llu", why, (unsigned long long)shared.fence_value);
+    /* Every FRUC call is waited for synchronously, so this only guards the last signal. */
+    if (SUCCEEDED(shared.fence->lpVtbl->SetEventOnCompletion(shared.fence, shared.fence_value, shared.event)))
+        WaitForSingleObject(shared.event, 500);
+    up.resources[0] = shared.interp;
+    up.resources[1] = shared.render[0];
+    up.resources[2] = shared.render[1];
+    up.count = 3;
+    trace("teardown-unregister %d", shared.unregister(shared.handle, &up));
+    trace("teardown-destroy %d", shared.destroy(shared.handle));
+    shared.handle = NULL;
+    RELEASE(shared.interp);
+    RELEASE(shared.render[0]);
+    RELEASE(shared.render[1]);
+    RELEASE(shared.fence);
+    CloseHandle(shared.event);
+    shared.event = NULL;
+    shared.device = NULL;
+    trace("teardown-end");
+}
+
+static int process_command(AVFilterContext *avctx, const char *cmd, const char *arg,
+                           char *res, int res_len, int flags)
+{
+    if (strcmp(cmd, "teardown"))
+        return AVERROR(ENOSYS);
+    ff_mutex_lock(&shared_lock);
+    shared_teardown("player stopping");
+    ff_mutex_unlock(&shared_lock);
+    go_passthrough(avctx, "FRUC released because the player is stopping");
+    return 0;
 }
 
 static int ensure_backend(AVFilterContext *avctx)
@@ -376,12 +467,18 @@ static int fruc_call(NvOFrucContext *s, ID3D11Texture2D *input, double in_ts, in
     pout.output.timestamp = out_ts;
     pout.output.frame_repeated = &repeated;
     pout.signal.fence.value = ++shared.fence_value;
+    trace("process-begin fence=%llu skip=%d", (unsigned long long)shared.fence_value, skip);
     st = shared.process(shared.handle, &pin, &pout);
-    if (st != FRUC_SUCCESS)
+    if (st != FRUC_SUCCESS) {
+        trace("process-failed %d", st);
         return -1;
+    }
     if (FAILED(shared.fence->lpVtbl->SetEventOnCompletion(shared.fence, shared.fence_value, shared.event)) ||
-        WaitForSingleObject(shared.event, s->fence_timeout_ms) != WAIT_OBJECT_0)
+        WaitForSingleObject(shared.event, s->fence_timeout_ms) != WAIT_OBJECT_0) {
+        trace("fence-timeout");
         return -2;
+    }
+    trace("process-end repeated=%d", repeated);
     return repeated ? 0 : 1;
 }
 
@@ -400,6 +497,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         go_passthrough(avctx, "only 8-bit NV12 video can use Generated Motion");
     if (s->simulate_failure > 0 && s->source_frames >= s->simulate_failure)
         go_passthrough(avctx, "simulated backend failure");
+    if (shared.created == -2)
+        go_passthrough(avctx, shared.failure);
     s->source_frames++;
 
     DEV_LOCK(s);
@@ -557,6 +656,7 @@ static int config_output(AVFilterLink *outlink)
         go_passthrough(avctx, "only 8-bit NV12 video can use Generated Motion");
     else
         ensure_backend(avctx);
+    trace("config %dx%d state=%s", s->width, s->height, s->state);
     av_log(avctx, AV_LOG_INFO, "Generated Motion %dx%d -> %d/%d fps: %s\n",
            s->width, s->height, s->fps.num, s->fps.den, s->state);
     return 0;
@@ -572,6 +672,7 @@ static av_cold int init(AVFilterContext *avctx)
 static av_cold void uninit(AVFilterContext *avctx)
 {
     NvOFrucContext *s = avctx->priv;
+    trace("uninit-begin state=%s frames=%lld", s->state, (long long)s->source_frames);
     RELEASE(s->processor);
     RELEASE(s->enumerator);
     RELEASE(s->video_context);
@@ -579,6 +680,7 @@ static av_cold void uninit(AVFilterContext *avctx)
     RELEASE(s->context4);
     av_buffer_unref(&s->frames_out);
     av_buffer_unref(&s->device_ref);
+    trace("uninit-end");
 }
 
 #define OFFSET(x) offsetof(NvOFrucContext, x)
@@ -609,6 +711,7 @@ const FFFilter ff_vf_nvofruc = {
     .priv_size      = sizeof(NvOFrucContext),
     .init           = init,
     .uninit         = uninit,
+    .process_command = process_command,
     FILTER_INPUTS(nvofruc_inputs),
     FILTER_OUTPUTS(nvofruc_outputs),
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_D3D11),
