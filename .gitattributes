@@ -1,0 +1,2 @@
+# Build recipes for the Generated Motion runtime run in an MSYS2 bash shell.
+*.sh text eol=lf

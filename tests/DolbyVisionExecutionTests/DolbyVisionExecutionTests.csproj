@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="../../src/AdaptiveMedia.App/Dv*.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/GeneratedMotion.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/DisplayCapability.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />

@@ -87,6 +87,17 @@ public sealed class PlaybackService
     /// the product always uses the defaults.</summary>
     public PlaybackHealthPolicy HealthPolicy { get; init; } = PlaybackHealthPolicy.Default;
 
+    /// <summary>Locates the experimental Generated Motion runtime; replaceable in tests.</summary>
+    internal Func<GeneratedMotionBackend?> GeneratedMotionRuntimeResolver { get; init; } = () => GeneratedMotionRuntime.Resolve();
+
+    /// <summary>Reads AC and Energy Saver state for Generated Motion; replaceable in tests.</summary>
+    internal Func<GeneratedMotionPower?> GeneratedMotionPowerSource { get; init; } = () =>
+        PlaybackTransitionObserver.CapturePower() is { } snapshot ? new(snapshot.AcLine == 1, snapshot.EnergySaver == 1) : null;
+
+    /// <summary>The stock player to resume on if a Generated Motion runtime fails, by pipe.</summary>
+    private readonly Dictionary<string, GeneratedMotionStockPath> _generatedMotionStock = [];
+    private sealed record GeneratedMotionStockPath(string Executable, PlaybackCapabilities Capabilities, bool StreamHelper);
+
     /// <summary>Hardware observation seam for deterministic transition tests.</summary>
     internal Func<DisplayCapability?, PlaybackTransitionObserver> TransitionObserverFactory { get; init; } =
         display => new(display);
@@ -270,9 +281,18 @@ public sealed class PlaybackService
             DiagnosticsStore.Event("info", "native-dv", "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason"));
             nativeNote = "Native Dolby Vision was not used: " + (outcome.Reason ?? "unknown reason");
         }
+        // The experimental runtime is only resolved when someone asked for it.
+        bool generatedAsked = options.MotionMode == "Generated" || options.Intent is { Mode: EnhancementMode.Enhanced, Motion: MotionIntent.GeneratedMotion };
+        GeneratedMotionBackend? generatedMotion = generatedAsked ? GeneratedMotionRuntimeResolver() : null;
+        GeneratedMotionPower? power = generatedAsked ? GeneratedMotionPowerSource() : null;
         var plan = PlaybackPlanBuilder.Build(mpv, Path.Combine(AppContext.BaseDirectory, "mpv-config"), expanded, options with { AutoHdrSwitch = settings.AutoHdrSwitch }, source, target,
             playbackCapabilities,
-            "adaptive-media-" + Guid.NewGuid().ToString("N"), settings.HdmiBitstream, HasStreamHelper(system));
+            "adaptive-media-" + Guid.NewGuid().ToString("N"), settings.HdmiBitstream, HasStreamHelper(system), generatedMotion, power);
+        if (plan.Renderer == GeneratedMotionPolicy.Renderer)
+        {
+            if (_generatedMotionStock.Count >= 32) _generatedMotionStock.Clear();
+            _generatedMotionStock[plan.PipeName] = new(mpv, playbackCapabilities, HasStreamHelper(system));
+        }
         if (_preparedReports.Count >= 32) { _preparedReports.Clear(); _preparedNotes.Clear(); }
         if (nativeNote is not null) _preparedNotes[plan.PipeName] = nativeNote;
         _preparedReports[plan.PipeName] = new() { Plan = plan, MpvVersion = capability.Version, Summary = plan.Summary,
@@ -342,6 +362,22 @@ public sealed class PlaybackService
             var compatibleRun = await RunOnceAsync(fallback, stopAfterSeconds, gate, PlaybackAttemptKind.Stable);
             code = compatibleRun.ExitCode;
             ReportStableHardFailure(compatibleRun);
+        }
+        else if (plan.Renderer == GeneratedMotionPolicy.Renderer && ShouldRecoverGeneratedMotion(stableRun) &&
+                 _generatedMotionStock.TryGetValue(plan.PipeName, out var stock))
+        {
+            // The experimental runtime is never the only way to finish the film.
+            const string reason = "The experimental Generated Motion runtime stopped. Resuming once on the stock player with temporal blend smoothing.";
+            LastReport.FallbackHistory.Add(reason); StatusChanged?.Invoke(reason);
+            DiagnosticsStore.Event("warning", "generated-motion", reason);
+            RecordRecovery(new(PlaybackRecoveryStep.UseStablePlayback,
+                stableRun.RecoveryTrigger ?? stableRun.Health?.State ?? SustainedPlaybackHealth.RuntimeFailure, reason),
+                stableRun.Health?.ResumePosition, stableRun, PlaybackAttemptKind.Stable, "Generated Motion runtime", "stock player");
+            var fallback = GeneratedMotionFallbackPlan(plan, stock, stableRun.Health?.ResumePosition);
+            LastReport.Plan = fallback;
+            var stockRun = await RunOnceAsync(fallback, stopAfterSeconds, gate, PlaybackAttemptKind.Stable);
+            code = stockRun.ExitCode;
+            ReportStableHardFailure(stockRun);
         }
         else ReportStableHardFailure(stableRun);
         // The compatibility retry is for a player that never got going. One that
@@ -599,6 +635,30 @@ public sealed class PlaybackService
             plan = retryPlan;
             LastReport!.Plan = retryPlan;
         }
+    }
+
+    /// <summary>A Generated Motion runtime that exits abnormally is replaced once;
+    /// a user stop or a normal end is never second-guessed.</summary>
+    private static bool ShouldRecoverGeneratedMotion(AttemptRun run) =>
+        run.ExitCode != 0 && run.TransitionFailure == PlaybackTransitionFailure.None &&
+        run.Health?.State is not (SustainedPlaybackHealth.UserStopped or SustainedPlaybackHealth.EndedNormally);
+
+    /// <summary>The same request on the stock player, with Generated Motion replaced by
+    /// temporal blend smoothing, resuming where the failed runtime stopped.</summary>
+    private static PlaybackPlan GeneratedMotionFallbackPlan(PlaybackPlan failed, GeneratedMotionStockPath stock, double? resumeAt)
+    {
+        string[] items = failed.Arguments.SkipWhile(x => x != "--").Skip(1).ToArray();
+        var options = failed.Requested with
+        {
+            MotionMode = "Smooth",
+            Intent = failed.Requested.Intent is { } intent ? intent with { Motion = MotionIntent.BlendSmooth } : null,
+        };
+        var plan = PlaybackPlanBuilder.Build(stock.Executable, Path.Combine(AppContext.BaseDirectory, "mpv-config"),
+            items, options, failed.Source, failed.Target, stock.Capabilities,
+            "adaptive-media-" + Guid.NewGuid().ToString("N"), failed.BitstreamRequested, stock.StreamHelper);
+        return WithResume(CarryUserResume(failed, plan) with {
+            Reasons = plan.Reasons.Insert(0, "The experimental Generated Motion runtime stopped; resuming once on the stock player with temporal blend smoothing.")
+        }, resumeAt);
     }
 
     private static bool ShouldRecoverTransition(AttemptRun run) =>
@@ -1026,7 +1086,8 @@ public sealed class PlaybackService
                     // Delivery evidence: what the renderer and timing actually did.
                     "time-pos", "playlist-pos", "display-sync-active", "video-speed-correction", "vo-passes",
                     "user-data/adaptive/source-epoch", "user-data/adaptive/rtx-sr", "user-data/adaptive/rtx-hdr",
-                    "user-data/adaptive/fit", "video-zoom", "video-align-x", "video-align-y" })
+                    "user-data/adaptive/fit", "video-zoom", "video-align-x", "video-align-y", "estimated-vf-fps",
+                    "vf-metadata/" + GeneratedMotionPolicy.FilterLabel })
                 {
                     var data = await ipc.CommandAsync(["get_property", name], queryTimeout.Token);
                     if (data.HasValue)

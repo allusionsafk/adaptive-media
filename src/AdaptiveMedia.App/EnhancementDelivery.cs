@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace AdaptiveMedia;
 
 /// <summary>An enhancement path the launched player was asked to run.</summary>
-public enum DeliveryFeature { HardwareDecoding, NvidiaVpp, RtxSuperResolution, RtxVideoHdr, ConventionalScaling, CadenceCorrection, BlendSmooth, Cleanup }
+public enum DeliveryFeature { HardwareDecoding, NvidiaVpp, RtxSuperResolution, RtxVideoHdr, ConventionalScaling, CadenceCorrection, BlendSmooth, Cleanup, GeneratedMotion }
 
 /// <summary>What one attempt's own runtime evidence established about a planned
 /// path. Only <see cref="Verified"/> is a delivery claim; everything else says why
@@ -40,7 +40,7 @@ public sealed record DeliveryVerdict(DeliveryFeature Feature, string Label, Deli
 /// asked the player to do. Read from the exact argv of one attempt, so a
 /// replacement attempt is judged against its own plan, never its predecessor's.</summary>
 public sealed record PlannedDelivery(string? Decoder, bool VppScaling, bool RtxSuperResolution, bool RtxVideoHdr,
-    string? Scaler, bool DisplayResample, bool Interpolation, string? Tscale, bool Deband)
+    string? Scaler, bool DisplayResample, bool Interpolation, string? Tscale, bool Deband, bool GeneratedMotion = false)
 {
     public static PlannedDelivery From(PlaybackPlan plan)
     {
@@ -62,7 +62,8 @@ public sealed record PlannedDelivery(string? Decoder, bool VppScaling, bool RtxS
         bool resample = Last("--video-sync") == "display-resample";
         return new(decoder, vppScale || srArmed, srArmed || vf.Contains("scaling-mode=nvidia", StringComparison.Ordinal),
             hdrArmed || vf.Contains("nvidia-true-hdr=yes", StringComparison.Ordinal), Last("--scale"), resample,
-            resample && Last("--interpolation") == "yes", Last("--tscale"), Last("--deband") == "yes");
+            resample && Last("--interpolation") == "yes", Last("--tscale"), Last("--deband") == "yes",
+            vf.StartsWith("@" + GeneratedMotionPolicy.FilterLabel + ":", StringComparison.Ordinal) && vf.Contains("nvofruc", StringComparison.Ordinal));
     }
 }
 
@@ -108,6 +109,19 @@ public static class DeliveryEvidence
 
     public static string? Text(IReadOnlyDictionary<string, JsonElement> o, string name) =>
         o.TryGetValue(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>What the NVIDIA FRUC filter itself reported on its latest output frame.</summary>
+    public sealed record FrucReport(string State, long Generated, long Repeated, long Errors, long Fallbacks, string? LastFallback);
+
+    public static FrucReport? Fruc(IReadOnlyDictionary<string, JsonElement> o)
+    {
+        if (!o.TryGetValue("vf-metadata/" + GeneratedMotionPolicy.FilterLabel, out var m) || m.ValueKind != JsonValueKind.Object) return null;
+        string? Field(string key) => m.TryGetProperty("lavfi.nvofruc." + key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        long Count(string key) => long.TryParse(Field(key), NumberStyles.None, CultureInfo.InvariantCulture, out long n) ? n : 0;
+        return Field("state") is { Length: > 0 } state
+            ? new(state, Count("generated"), Count("repeated"), Count("errors"), Count("fallbacks"), Field("last_fallback"))
+            : null;
+    }
 
     public static bool? Flag(IReadOnlyDictionary<string, JsonElement> o, string name) =>
         o.TryGetValue(name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False ? v.GetBoolean() : null;
@@ -290,6 +304,29 @@ public static class EnhancementDeliveryVerifier
                 verdicts.Add(new(DeliveryFeature.ConventionalScaling, label, DeliveryState.Unverified, "no " + scaler + " pass was reported and the output geometry is unknown"));
             else
                 verdicts.Add(new(DeliveryFeature.ConventionalScaling, label, DeliveryState.FellBack, "the renderer upscaled without a " + scaler + " pass"));
+        }
+
+        if (planned.GeneratedMotion)
+        {
+            const string label = "Generated Motion (NVIDIA FRUC)";
+            var fruc = DeliveryEvidence.Fruc(observed);
+            string rate = DeliveryEvidence.Number(observed, "estimated-vf-fps") is double fps
+                ? ", filter output " + fps.ToString("0.#", CultureInfo.InvariantCulture) + " fps" : "";
+            if (!flowing) verdicts.Add(Waiting(DeliveryFeature.GeneratedMotion, label));
+            else if (fruc is null)
+                verdicts.Add(new(DeliveryFeature.GeneratedMotion, label, DeliveryState.FellBack,
+                    "the player reported no Generated Motion filter output, so no frames were synthesized; temporal blend smoothing continued"));
+            else if (fruc.Fallbacks > 0 || !fruc.State.Equals("active", StringComparison.Ordinal))
+                verdicts.Add(new(DeliveryFeature.GeneratedMotion, label, DeliveryState.FellBack,
+                    "NVIDIA FRUC stopped (" + (fruc.LastFallback ?? fruc.State) + ") after synthesizing " + fruc.Generated +
+                    " frames; temporal blend smoothing continued without generated frames"));
+            else if (fruc.Generated > 0)
+                verdicts.Add(new(DeliveryFeature.GeneratedMotion, label, DeliveryState.Verified,
+                    "NVIDIA FRUC backend loaded and synthesized " + fruc.Generated + " intermediate frames (" + fruc.Repeated +
+                    " repeated at scene cuts or low-confidence motion)" + rate));
+            else
+                verdicts.Add(new(DeliveryFeature.GeneratedMotion, label, DeliveryState.Unverified,
+                    "NVIDIA FRUC backend loaded, but it has not synthesized a frame yet (" + fruc.Repeated + " repeated)" + rate));
         }
 
         if (planned.DisplayResample)

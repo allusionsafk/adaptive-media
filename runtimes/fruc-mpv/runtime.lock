@@ -1,0 +1,19 @@
+# Inputs of DemiMedia's experimental Generated Motion runtime (gm-2026-09-26-1).
+# Nothing here is redistributed by this repository; each input is fetched and
+# verified locally, and the NVIDIA library comes from the user's own SDK download.
+
+msys2-base          msys2-base-x86_64-20260611.tar.xz  sha256 a2d047e8ee213c3c6a49a8de427eb1069df12207c0422ff1b3cbb5c905c34221
+                    https://github.com/msys2/msys2-installer/releases/download/2026-06-11/
+msys2-packages      mingw-w64-ucrt-x86_64-mpv 0.41.0-8, mingw-w64-ucrt-x86_64-libplacebo 7.360.1-2,
+                    mingw-w64-ucrt-x86_64-gcc 16.2.0-4 (pacman -Syuu on 2026-09-26)
+ffmpeg              ffmpeg-9.0.2.tar.xz  sha256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+                    https://ffmpeg.org/releases/  (build.sh adds ffmpeg/vf_nvofruc.c)
+nvidia-fruc         Optical_Flow_SDK_5.0.7.zip  sha256 89b0923adc6f34fbe86e63cc17d5db452e34b945c03ba90d8e09bd1a0158e917
+                    NvOFFRUC\NvOFFRUCSample\bin\win64\{NvOFFRUC.dll,cudart64_110.dll}; downloaded by the user under
+                    NVIDIA's SDK license from https://developer.nvidia.com/opticalflow/download
+
+# Build (inside an MSYS2 UCRT64 shell):
+#   build.sh <ffmpeg-9.0.2.tar.xz> <work> <ffmpeg-prefix>
+#   stage.sh <ffmpeg-prefix> <runtime-out>
+# Install (Windows PowerShell 5.1):
+#   scripts\Install-GeneratedMotionRuntime.ps1 -RuntimeDirectory <runtime-out> -FrucDirectory <sdk win64> -Id <id>

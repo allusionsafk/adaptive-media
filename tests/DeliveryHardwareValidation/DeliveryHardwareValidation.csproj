@@ -14,6 +14,12 @@
     <Compile Include="../../src/AdaptiveMedia.App/MpvIpc.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/GeneratedMotion.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/GeneratedMotionRuntime.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackTransitionRecovery.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/PlaybackTransitionObserver.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/CinemaBoostPolicy.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/CinemaBoostService.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/DisplayCapability.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" />

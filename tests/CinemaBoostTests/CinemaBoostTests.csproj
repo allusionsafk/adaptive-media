@@ -4,6 +4,7 @@
     <Compile Include="../../src/AdaptiveMedia.App/Models.cs" Link="Models.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/DisplayCapability.cs" Link="DisplayCapability.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/PlaybackPlan.cs" Link="PlaybackPlan.cs" />
+    <Compile Include="../../src/AdaptiveMedia.App/GeneratedMotion.cs" Link="GeneratedMotion.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/EnhancementPlanning.cs" Link="EnhancementPlanning.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/CinemaBoostPolicy.cs" Link="CinemaBoostPolicy.cs" />
     <Compile Include="../../src/AdaptiveMedia.App/SettingsStore.cs" Link="SettingsStore.cs" />

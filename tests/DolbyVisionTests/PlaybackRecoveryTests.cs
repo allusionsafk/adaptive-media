@@ -29,6 +29,9 @@ internal static class PlaybackRecoveryTests
                 var store = new NativeDvRuntimeStore(Directory.GetParent(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))!.FullName);
                 if (!store.IsPinned(generation)) return 2;
             }
+            // A peer may describe a different source, such as an SDR film for Generated Motion.
+            string probe = Path.Combine(AppContext.BaseDirectory, "probe.txt");
+            if (File.Exists(probe)) { Console.Write(File.ReadAllText(probe)); return 0; }
             Console.WriteLine("AMDV|7|6|hevc|pq|bt.2020|3840|2160");
             Console.WriteLine("AMPROBE|3840|2160|24|hevc|pq|bt.2020|aac|yuv420p10le|1.777777");
             return 0;
@@ -565,6 +568,59 @@ internal static class PlaybackRecoveryTests
                     "TRANSITION RECOVERY: a power gap and failed player cause one compatible resume");
                 File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "base");
                 Mode(a, "full"); Mode(b, "base"); Reset();
+            }
+            if (only is null or "generated")
+            {
+                // The experimental Generated Motion runtime is a separate player. If it
+                // fails mid-film, the stock player resumes once with blend smoothing.
+                string gmDir = Path.Combine(root, "generated-motion");
+                CopyPeer(gmDir);
+                File.WriteAllText(Path.Combine(gmDir, "version.txt"), "generated-motion-peer");
+                const string sdrProbe = "AMPROBE|1920|1080|24|h264|bt.1886|bt.709|aac|yuv420p|1.777777|120\n";
+                File.WriteAllText(Path.Combine(gmDir, "probe.txt"), sdrProbe);
+                File.WriteAllText(Path.Combine(stableDir, "probe.txt"), sdrProbe);
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "play");
+                string gmExe = Path.Combine(gmDir, "DolbyVisionTests.exe");
+                int Lines(string path) => File.Exists(path) ? File.ReadAllLines(path).Length : 0;
+                var gmService = new PlaybackService
+                {
+                    NativeDolbyVision = null, HealthPolicy = FastHealth,
+                    GeneratedMotionRuntimeResolver = () => new(gmExe, "gm-test", "generated motion test peer"),
+                    GeneratedMotionPowerSource = () => new(true, false),
+                };
+                var system = new SystemSummary { MpvPath = stableExe, HasNvidia = true, NvidiaAdapter = "NVIDIA GeForce RTX 4080 Laptop GPU" };
+                var request = new PlaybackOptions("Enhanced", "Off", "Off", false, false,
+                    Intent: EnhancementIntent.ForEnhanced(DetailIntent.Preserve, MotionIntent.GeneratedMotion, CleanupIntent.PreserveTexture));
+                var gmPlan = await gmService.PrepareAsync([media], request, system,
+                    new AppSettings { NativeDolbyVisionLane = false, AutoHdrSwitch = false }, new(1920, 1080));
+                check(gmPlan.Renderer == GeneratedMotionPolicy.Renderer && gmPlan.Executable == gmExe &&
+                      gmPlan.Arguments.Contains("--vf=@fruc:lavfi=[nvofruc=fps=48]"),
+                    "GENERATED MOTION: an explicit request on an eligible SDR source prepares the experimental runtime (" +
+                    gmPlan.Renderer + ": " + string.Join(" | ", gmPlan.Reasons) + ")");
+
+                File.WriteAllText(Path.Combine(gmDir, "behavior.txt"), "crash-late");
+                int stableBefore = Lines(Path.Combine(stableDir, "launches.txt"));
+                await gmService.LaunchAsync(gmPlan, 3);
+                var report = gmService.LastReport!;
+                string lastStable = File.ReadAllLines(Path.Combine(stableDir, "launches.txt"))[^1];
+                check(report.Attempts.Count == 2 && report.Attempts[1].Executable == stableExe &&
+                      report.Attempts[1].Renderer != GeneratedMotionPolicy.Renderer &&
+                      !report.Attempts[1].Arguments.Any(a => a.Contains("nvofruc")) &&
+                      report.Attempts[1].Arguments.Contains("--interpolation=yes") &&
+                      report.Attempts[1].RecoveryResumeAt is > 0 &&
+                      Lines(Path.Combine(stableDir, "launches.txt")) == stableBefore + 1 && lastStable.StartsWith("play|start=", StringComparison.Ordinal),
+                    "GENERATED MOTION: a runtime crash resumes once, from position, on the stock player with blend smoothing");
+                check(report.Recovery.Single().Explanation.Contains("Generated Motion runtime stopped", StringComparison.Ordinal) &&
+                      report.FallbackHistory.Any(x => x.Contains("stock player", StringComparison.Ordinal)),
+                    "GENERATED MOTION: the recovery is recorded and explained");
+
+                File.WriteAllText(Path.Combine(gmDir, "behavior.txt"), "play");
+                await gmService.LaunchAsync(gmPlan, 3);
+                check(gmService.LastReport!.Attempts.Count == 1 && gmService.LastReport.Recovery.Count == 0,
+                    "GENERATED MOTION: a user stop is never second-guessed into a relaunch");
+
+                File.Delete(Path.Combine(stableDir, "probe.txt"));
+                File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "base");
             }
             if (only is null or "unprotected")
             {
