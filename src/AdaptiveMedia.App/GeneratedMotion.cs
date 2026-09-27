@@ -9,6 +9,23 @@ public sealed record GeneratedMotionBackend(string Executable, string RuntimeId,
 /// <summary>Power state that gates a heavy optional GPU path.</summary>
 public sealed record GeneratedMotionPower(bool OnAc, bool EnergySaver);
 
+/// <summary>How a Generated Motion runtime that has finished its work is let go. The
+/// runtime is disposable: once playback has ended, a fault inside vendor teardown is
+/// contained rather than reported as a failed playback. A fault while the film is
+/// still playing is never contained.</summary>
+public static class GeneratedMotionTeardown
+{
+    /// <summary>How long a runtime asked to stop may take before it is terminated.</summary>
+    public static readonly TimeSpan Grace = TimeSpan.FromSeconds(3);
+
+    /// <summary>Windows fault exits such as 0xC0000005 and 0xC0000409.</summary>
+    public static bool IsFaultExit(int exitCode) => (uint)exitCode >= 0xC0000000u;
+
+    public static bool Contained(string renderer, int exitCode, bool stopRequested, string? endFileReason) =>
+        renderer == GeneratedMotionPolicy.Renderer && exitCode != 0 &&
+        (stopRequested || endFileReason is "eof" or "quit" or "stop" && IsFaultExit(exitCode));
+}
+
 /// <summary>Side-effect-free rules for when Generated Motion may be planned.</summary>
 public static class GeneratedMotionPolicy
 {

@@ -45,6 +45,10 @@ public sealed class PlaybackHealthMonitor
     /// <summary>Which runtime this attempt ran on, for diagnostics only.</summary>
     public string Runtime { get; }
     public bool StopRequested { get; private set; }
+    /// <summary>Why the player said the file ended, if it said so before exiting.</summary>
+    public string? EndFileReason => _endFileReason;
+    /// <summary>An end-file reason seen by a dedicated event listener.</summary>
+    public void RecordEndFile(string reason) => _endFileReason = reason;
     public event Action<PlaybackHealthTransition>? Transitioned;
 
     public bool RecoveryStop { get; private set; }

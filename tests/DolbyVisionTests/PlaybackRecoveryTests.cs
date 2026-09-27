@@ -61,7 +61,7 @@ internal static class PlaybackRecoveryTests
                 await Task.Delay(1500);
                 File.AppendAllText(log, "Dolby Vision Profile 7 splitter: BL stream 0, virtual EL stream 1 (dependent_track)\n[vd] Opening decoder hevc\n[vd] Opening decoder hevc\n[vd] Selected decoder: hevc\n[vf] [el_pair]\nsh_dovi_compose_nlq\n[vd] Using hardware decoding (d3d11va).\n");
             });
-        bool progresses = mode is "play" or "late-compose" or "pause" or "freeze" or "stall" or "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late";
+        bool progresses = mode is "play" or "late-compose" or "pause" or "freeze" or "stall" or "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late" or "stop-fault" or "eof-fault";
         double from = double.TryParse(startArgument, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
         var gate = new object();
         Stopwatch? playing = null;
@@ -70,6 +70,8 @@ internal static class PlaybackRecoveryTests
         bool Frozen() => mode is "freeze" or "freeze-crash" && Elapsed() > 1.0;
 
         var exit = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Like mpv, events go to every connected client.
+        var writers = new List<StreamWriter>();
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         async Task Serve(NamedPipeServerStream pipe)
         {
@@ -77,6 +79,7 @@ internal static class PlaybackRecoveryTests
             {
                 using var reader = new StreamReader(pipe, leaveOpen: true);
                 await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
+                lock (writers) writers.Add(writer);
                 while (await reader.ReadLineAsync(lifetime.Token) is { } line)
                 {
                     lock (gate) playing ??= Stopwatch.StartNew();
@@ -103,7 +106,8 @@ internal static class PlaybackRecoveryTests
                         _ => null
                     };
                     await writer.WriteLineAsync(JsonSerializer.Serialize(new { request_id = message.RootElement.GetProperty("request_id").GetInt32(), error = name == "quit" && mode == "reject-stop" ? "command failed" : data is null && name == "get_property" ? "property unavailable" : "success", data }));
-                    if (name == "quit") { exit.TrySetResult(mode == "reject-stop" ? 1 : 0); return; }
+                    // stop-fault: a teardown fault after a requested stop, as the FRUC runtime showed.
+                    if (name == "quit") { exit.TrySetResult(mode == "reject-stop" ? 1 : mode == "stop-fault" ? unchecked((int)0xC0000005) : 0); return; }
                     // The monitor has consumed a complete poll and, for partial, its log.
                     if (name == "set_property" && prop == "msg-level" && mode == "partial") { exit.TrySetResult(1); return; }
                 }
@@ -124,6 +128,16 @@ internal static class PlaybackRecoveryTests
                 _ = Serve(pipe);
             }
         });
+        // eof-fault: the file ends normally, then the player faults on the way out.
+        if (mode == "eof-fault")
+            _ = Task.Run(async () =>
+            {
+                while (Elapsed() < 1.0) await Task.Delay(20);
+                StreamWriter[] all; lock (writers) all = writers.ToArray();
+                foreach (var w in all) { try { await w.WriteLineAsync("{\"event\":\"end-file\",\"reason\":\"eof\"}"); } catch (Exception) { } }
+                await Task.Delay(400);
+                Environment.Exit(unchecked((int)0xC0000005));
+            });
         if (mode is "crash-late" or "freeze-crash" or "gpu-lost-late" or "power-fail-late")
             _ = Task.Run(async () =>
             {
@@ -618,6 +632,19 @@ internal static class PlaybackRecoveryTests
                 await gmService.LaunchAsync(gmPlan, 3);
                 check(gmService.LastReport!.Attempts.Count == 1 && gmService.LastReport.Recovery.Count == 0,
                     "GENERATED MOTION: a user stop is never second-guessed into a relaunch");
+
+                // A fault in vendor teardown after the film is over is a completed stop, not a failure.
+                File.WriteAllText(Path.Combine(gmDir, "behavior.txt"), "stop-fault");
+                int stopFaultCode = await gmService.LaunchAsync(gmPlan, 3);
+                check(stopFaultCode == 0 && gmService.LastReport!.ExitCode == 0 && gmService.LastReport.Attempts.Count == 1 &&
+                      gmService.LastReport.Recovery.Count == 0 && gmService.LastPlaybackHealth?.State == SustainedPlaybackHealth.UserStopped,
+                    "GENERATED MOTION: a teardown fault after a requested stop is contained as a completed stop");
+                File.WriteAllText(Path.Combine(gmDir, "behavior.txt"), "eof-fault");
+                int eofFaultCode = await gmService.LaunchAsync(gmPlan, 30);
+                check(eofFaultCode == 0 && gmService.LastReport!.Attempts.Count == 1 && gmService.LastReport.Recovery.Count == 0 &&
+                      gmService.LastPlaybackHealth?.State == SustainedPlaybackHealth.EndedNormally,
+                    "GENERATED MOTION: a teardown fault after end of file is contained and never replays the film (code " + eofFaultCode +
+                    ", attempts " + gmService.LastReport.Attempts.Count + ", health " + gmService.LastPlaybackHealth?.State + ")");
 
                 File.Delete(Path.Combine(stableDir, "probe.txt"));
                 File.WriteAllText(Path.Combine(stableDir, "behavior.txt"), "base");
