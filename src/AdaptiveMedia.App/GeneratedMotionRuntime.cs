@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace AdaptiveMedia;
@@ -9,7 +10,7 @@ namespace AdaptiveMedia;
 public static class GeneratedMotionRuntime
 {
     public static string DefaultRootPath => Path.Combine(SettingsStore.DirectoryPath, "runtimes", "generated-motion");
-    private static readonly string[] Critical = ["mpv.exe", "avfilter-12.dll", "NvOFFRUC.dll"];
+    private static readonly string[] Required = ["mpv.exe", "avfilter-12.dll", "NvOFFRUC.dll"];
     private static readonly object Gate = new();
     private static (string Key, GeneratedMotionBackend? Backend)? _cache;
 
@@ -26,11 +27,35 @@ public static class GeneratedMotionRuntime
             string dir = Path.Combine(root, id);
             string manifestPath = Path.Combine(dir, "manifest.json");
             if (!File.Exists(manifestPath)) return null;
-            var stamp = new FileInfo(manifestPath);
-            string key = dir + "|" + stamp.Length + "|" + stamp.LastWriteTimeUtc.Ticks + "|" +
-                string.Join("|", Critical.Select(f => new FileInfo(Path.Combine(dir, f))).Select(f => f.Exists ? f.Length + ":" + f.LastWriteTimeUtc.Ticks : "missing"));
+            string manifestJson = File.ReadAllText(manifestPath);
+            using var manifest = JsonDocument.Parse(manifestJson);
+            var rootElement = manifest.RootElement;
+            if (!rootElement.TryGetProperty("schemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number ||
+                !schema.TryGetInt32(out int version) || version != 1 ||
+                !rootElement.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Object) return null;
+            var listed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in files.EnumerateObject())
+            {
+                string name = file.Name;
+                if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                    name.Contains('/') || name.Contains('\\') || name.Contains("..", StringComparison.Ordinal) ||
+                    name.EndsWith('.') || name.EndsWith(' ') || file.Value.ValueKind != JsonValueKind.String ||
+                    !listed.TryAdd(name, file.Value.GetString()!)) return null;
+            }
+            if (Required.Any(f => !listed.ContainsKey(f))) return null;
+            string description = id;
+            if (rootElement.TryGetProperty("description", out var d))
+            {
+                if (d.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) return null;
+                description = d.GetString() ?? id;
+            }
+            // Bind cached validation to the exact manifest content. Component stamps
+            // avoid rehashing the runtime on every preparation; deliberate rewrites
+            // preserving both length and timestamp still require a cold validation.
+            string key = dir + "|" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifestJson))) + "|" +
+                string.Join("|", listed.Keys.Select(f => new FileInfo(Path.Combine(dir, f))).Select(f => f.Exists ? f.Length + ":" + f.LastWriteTimeUtc.Ticks : "missing"));
             lock (Gate) if (_cache is { } hit && hit.Key == key) return hit.Backend;
-            var backend = Validate(dir, id, manifestPath);
+            var backend = Validate(dir, id, description, listed);
             lock (Gate) _cache = (key, backend);
             return backend;
         }
@@ -40,27 +65,17 @@ public static class GeneratedMotionRuntime
         }
     }
 
-    private static GeneratedMotionBackend? Validate(string dir, string id, string manifestPath)
+    private static GeneratedMotionBackend? Validate(string dir, string id, string description, IReadOnlyDictionary<string, string> listed)
     {
-        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        var rootElement = manifest.RootElement;
-        if (!rootElement.TryGetProperty("schemaVersion", out var schema) || schema.GetInt32() != 1 ||
-            !rootElement.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Object) return null;
-        var listed = files.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? "", StringComparer.OrdinalIgnoreCase);
-        if (Critical.Any(f => !listed.ContainsKey(f))) return null;
         foreach (var (name, expected) in listed)
         {
-            if (name.Contains('/') || name.Contains('\\') || name.Contains("..", StringComparison.Ordinal)) return null;
             string path = Path.Combine(dir, name);
             if (!File.Exists(path)) return null;
-            // Every file is present; the ones that define behaviour are also hashed.
-            if (Critical.Contains(name, StringComparer.OrdinalIgnoreCase))
-            {
-                using var stream = File.OpenRead(path);
-                if (!Convert.ToHexString(SHA256.HashData(stream)).Equals(expected, StringComparison.OrdinalIgnoreCase)) return null;
-            }
+            // Any library in the installed runtime can affect playback, so the
+            // installer's manifest covers every component rather than a shortlist.
+            using var stream = File.OpenRead(path);
+            if (!Convert.ToHexString(SHA256.HashData(stream)).Equals(expected, StringComparison.OrdinalIgnoreCase)) return null;
         }
-        string description = rootElement.TryGetProperty("description", out var d) ? d.GetString() ?? id : id;
         return new(Path.Combine(dir, "mpv.exe"), id, description);
     }
 }

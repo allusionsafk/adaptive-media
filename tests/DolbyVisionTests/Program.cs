@@ -4,7 +4,9 @@ AppDomain.CurrentDomain.UnhandledException += (_, e) => { Console.Error.WriteLin
 if (await PlaybackRecoveryTests.ChildAsync(args) is int childExit) { Environment.Exit(childExit); return; }
 int checks = 0;
 void Check(bool condition, string message) { checks++; if (!condition) throw new Exception(message); }
+if (args.FirstOrDefault() == "--generated-motion-runtime-tests") { GeneratedMotionRuntimeTests.Run(Check); Console.WriteLine($"PASS: {checks} Generated Motion runtime assertions"); return; }
 if (args.FirstOrDefault() == "--recovery-tests") { await PlaybackRecoveryTests.RunAsync(Check, args.ElementAtOrDefault(1)); Console.WriteLine($"PASS: {checks} recovery assertions"); return; }
+GeneratedMotionRuntimeTests.Run(Check);
 var video = new MediaInfo(3840, 2160, 23.976, "hevc", "pq", "bt.2020", PixelFormat: "yuv420p10le");
 var mel = new DvSourceInfo(DvDetection.Detected, 7, 6, video, DvCompatibility.Yes, DvEnhancementLayer.Mel, DvRpuStatus.Validated, 10, "Validated fixture facts");
 var fel = mel with { EnhancementLayer = DvEnhancementLayer.Fel };
